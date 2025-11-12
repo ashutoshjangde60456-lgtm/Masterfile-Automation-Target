@@ -1,4 +1,4 @@
-# app_masterfile.py  — Auto-map version (no JSON required, with review UI)
+# app_masterfile.py
 
 import io
 import json
@@ -20,183 +20,135 @@ def norm(s: str) -> str:
     if s is None:
         return ""
     x = str(s).strip().lower()
+    # strip "- en-us" & variants
     x = re.sub(r"\s*-\s*en\s*[-_ ]\s*us\s*$", "", x)
+    # normalize dashes
     x = x.replace("–", "-").replace("—", "-").replace("−", "-")
+    # replace common separators with a space (keep '-' last in class)
     x = re.sub(r"[._/\\-]+", " ", x)
+    # drop anything not alnum or space
     x = re.sub(r"[^0-9a-z\s]+", " ", x)
+    # collapse spaces
     return re.sub(r"\s+", " ", x).strip()
 
-def nonempty_rows(df: pd.DataFrame) -> int:
-    if df.empty:
-        return 0
-    return df.replace("", pd.NA).dropna(how="all").shape[0]
+
+def top_matches(query, candidates, k=3):
+    q = norm(query)
+    scored = [(SequenceMatcher(None, q, norm(c)).ratio(), c) for c in candidates]
+    scored.sort(key=lambda t: t[0], reverse=True)
+    return scored[:k]
+
 
 def worksheet_used_cols(ws, header_rows=(1,), hard_cap=512, empty_streak_stop=8):
+    """Heuristically detect meaningful column span by scanning header rows."""
     max_try = min(ws.max_column, hard_cap)
     last_nonempty, streak = 0, 0
     for c in range(1, max_try + 1):
-        any_val = any((ws.cell(row=r, column=c).value not in (None, "")) for r in header_rows)
+        any_val = False
+        for r in header_rows:
+            v = ws.cell(row=r, column=c).value
+            if v not in (None, ""):
+                any_val = True
+                break
         if any_val:
-            last_nonempty, streak = c, 0
+            last_nonempty = c
+            streak = 0
         else:
             streak += 1
             if streak >= empty_streak_stop:
                 break
     return max(last_nonempty, 1)
 
-def pick_best_onboarding_sheet(uploaded_file):
+
+def nonempty_rows(df: pd.DataFrame) -> int:
+    """Count rows that have at least one non-empty cell."""
+    if df.empty:
+        return 0
+    tmp = df.replace("", pd.NA)
+    return tmp.dropna(how="all").shape[0]
+
+
+def pick_best_onboarding_sheet(uploaded_file, mapping_aliases_by_master):
+    """
+    Inspect all sheets and pick the best one:
+    - Row 1 is treated as headers
+    - Row 2+ as data
+    - Score = number of mapping keys that find at least one alias in the sheet headers
+              + small tie-breaker for non-empty data rows
+    Returns (best_df, best_sheet_name, debug_info)
+    """
+    # Read the Excel once to list sheets
     uploaded_file.seek(0)
     xl = pd.ExcelFile(uploaded_file)
+
     best = None
     best_score = -1
     best_info = ""
     for sheet in xl.sheet_names:
         try:
-            df = xl.parse(sheet_name=sheet, header=0, dtype=str).fillna("")
+            df = xl.parse(sheet_name=sheet, header=0, dtype=str)
+            df = df.fillna("")
             df.columns = [str(c).strip() for c in df.columns]
         except Exception:
             continue
+
+        header_set = {norm(c) for c in df.columns}
+        matches = 0
+        for master_norm, aliases in mapping_aliases_by_master.items():
+            # test if any alias exists in this sheet
+            if any(norm(a) in header_set for a in aliases):
+                matches += 1
+
         rows = nonempty_rows(df)
-        score = rows  # prefer non-empty
+        score = matches + min(rows, 1) * 0.01  # tiny tie-breaker for having data
+
         if score > best_score:
-            best, best_score = (df, sheet), score
-            best_info = f"non-empty rows: {rows}"
+            best = (df, sheet)
+            best_score = score
+            best_info = f"matched headers: {matches}, non-empty rows: {rows}"
+
     if best is None:
         raise ValueError("No readable sheet found in onboarding workbook.")
-    return best[0], best[1], best_info
 
-# ---------- Heuristic Auto-Mapping ----------
-# Small alias bank (extend as needed). Keys are canonical master display headers.
-ALIAS_BANK = {
-    "partner sku": ["partner sku", "seller sku", "target sku", "walmart sku", "item sku", "sku", "item_sku", "productcode", "product code"],
-    "item sku": ["item sku", "sku", "productcode", "product code", "seller sku"],
-    "barcode": ["barcode", "upc", "upc/ean", "ean", "gtin", "external product id", "product id", "barcode value", "gtin13", "gtin-13", "gtin14", "gtin-14"],
-    "brand": ["brand", "brand name", "manufacturer brand"],
-    "product title": ["product title", "title", "item name", "product name", "item title", "name"],
-    "description": ["description", "long description", "product description", "item description", "desc"],
-    "package depth": ["package depth", "depth", "length", "package length"],
-    "package height": ["package height", "height"],
-    "package width": ["package width", "width"],
-    "package weight": ["package weight", "weight", "shipping weight"],
-    "country of origin": ["country of origin", "made in", "madein", "origin country", "countryoforigin"],
-    "price": ["price", "selling price", "sellingprice", "mrp", "msrp"],
-    "mrp": ["mrp", "msrp", "maximum retail price"],
-    "hsn": ["hsn", "hs code", "hsn code", "hs code number"],
-    "tax code": ["tax code", "taxcode"],
-    "primary color": ["primary color", "color"],
-    "size": ["size", "age size", "apparel size"],
-    "keywords": ["keywords", "search keywords", "search terms", "generic keywords"],
-    "bullet feature 1": ["bullet feature 1", "bullet point1", "bullet_point1", "key feature 1"],
-    "bullet feature 2": ["bullet feature 2", "bullet point2", "bullet_point2", "key feature 2"],
-    "bullet feature 3": ["bullet feature 3", "bullet point3", "bullet_point3", "key feature 3"],
-    "bullet feature 4": ["bullet feature 4", "bullet point4", "bullet_point4", "key feature 4"],
-    "bullet feature 5": ["bullet feature 5", "bullet point5", "bullet_point5", "key feature 5"],
-    "image1": ["image1", "image url 1", "imageurl1", "main image", "primary image"],
-    "image2": ["image2", "image url 2", "imageurl2"],
-    "image3": ["image3", "image url 3", "imageurl3"],
-    "image4": ["image4", "image url 4", "imageurl4"],
-    "image5": ["image5", "image url 5", "imageurl5"],
-}
+    df, sheet_name = best
+    return df, sheet_name, best_info
 
-GENERIC_TOKENS = {"value", "name", "code", "id", "info", "data", "attribute", "field"}
 
-def token_set(s: str):
-    return {t for t in norm(s).split() if t and t not in GENERIC_TOKENS}
-
-def fuzzy_ratio(a: str, b: str) -> float:
-    return SequenceMatcher(None, norm(a), norm(b)).ratio()
-
-def score_pair(master_disp: str, candidate_header: str) -> float:
-    """0..1 confidence scoring combining alias hits, token overlap, and fuzzy."""
-    m = norm(master_disp)
-    c = norm(candidate_header)
-    if not m or not c:
-        return 0.0
-
-    # 1) Exact/equivalent
-    if m == c:
-        return 1.00
-
-    # 2) Alias bank boost
-    aliases = ALIAS_BANK.get(m, [])
-    if c in [norm(x) for x in aliases]:
-        return 0.95
-
-    # 3) Token overlap
-    mt, ct = token_set(m), token_set(c)
-    if mt and ct:
-        j = len(mt & ct) / len(mt | ct)
-    else:
-        j = 0.0
-
-    # 4) Startswith / Endswith small boosts
-    starts = 0.1 if c.startswith(m) or m.startswith(c) else 0.0
-    ends   = 0.05 if c.endswith(m) or m.endswith(c) else 0.0
-
-    # 5) Fuzzy ratio
-    fz = fuzzy_ratio(m, c)
-
-    # Weighted sum (tuned conservatively)
-    score = 0.45 * fz + 0.40 * j + starts + ends
-
-    # 6) Penalize ultra-short collisions (e.g., "id", "name")
-    if len(mt) == 1 and len(next(iter(mt))) <= 3:
-        score -= 0.1
-
-    return max(0.0, min(1.0, score))
-
-def suggest_mapping(master_headers, onboarding_headers, extra_mapping_json=None):
-    """
-    Return dict: master_display -> (best_candidate_or_None, confidence, ranked_list)
-    If extra_mapping_json is provided, treat as additional aliases with high priority.
-    """
-    results = {}
-    on_norm_index = {norm(h): h for h in onboarding_headers}
-
-    # Build dynamic alias additions from user JSON (optional)
-    dynamic_alias = {}
-    if isinstance(extra_mapping_json, dict):
-        for k, v in extra_mapping_json.items():
-            key = norm(k)
-            vals = v[:] if isinstance(v, list) else [v]
-            dynamic_alias[key] = [norm(x) for x in vals]
-
-    for m in master_headers:
-        m_norm = norm(m)
-        ranked = []
-
-        # If user JSON explicitly maps this header and a candidate exists, boost it strongly
-        if m_norm in dynamic_alias:
-            for alias_n in dynamic_alias[m_norm]:
-                if alias_n in on_norm_index:
-                    ranked.append((on_norm_index[alias_n], 0.99))
-
-        # Score all onboarding headers
-        for cand in onboarding_headers:
-            ranked.append((cand, score_pair(m, cand)))
-
-        # Sort unique candidates by score desc
-        seen = set()
-        ranked = [(c, sc) for c, sc in sorted(ranked, key=lambda x: x[1], reverse=True) if not (c in seen or seen.add(c))]
-
-        best_cand, best_sc = (ranked[0] if ranked else (None, 0.0))
-        results[m] = (best_cand, best_sc, ranked[:10])  # keep top 10 for UI
-    return results
+# Unique sentinel for the special "Listing Action" fill
+SENTINEL_LISTING_ACTION = object()
 
 # =========================
 # UI
 # =========================
 st.title("📦 Masterfile Automation")
-st.caption("Auto-map onboarding headers to master template with review & confirmation.")
+st.caption("Map onboarding columns to master template headers and generate a ready-to-upload masterfile.")
 
-with st.expander("ℹ️ Instructions", expanded=False):
-    st.markdown(dedent("""
+with st.expander("ℹ️ Instructions", expanded=True):
+    instructions = dedent("""
     - **Masterfile template (.xlsx)**  
-      Row 1 = display labels, Row 2 = internal keys (if present). Data is written from Row 3.
+      - Row **1** = display labels  
+      - Row **2** = internal keys/helper labels  
+      - Data is written starting at **Row 3** (this tool preserves template styles).
+
     - **Onboarding sheet (.xlsx)**  
-      Row 1 = headers, Row 2+ = data.
-    - You can run **Auto-map (no JSON)** or optionally add **Mapping JSON** as hints; you will always be able to review and adjust mappings before writing.
-    """))
+      - Row **1** = **headers**  
+      - Row **2+** = data
+
+    - **Mapping JSON**: keys are the **master display headers** (Row 1 of master).  
+      Values are **lists of onboarding header aliases** in priority order (first that exists is used).
+
+    **Example**
+    ```json
+    {
+      "Partner SKU": ["Target SKU","Seller SKU","SKU","item_sku"],
+      "Barcode": ["UPC/EAN","UPC","Product ID","barcode","barcode.value"],
+      "Brand": ["Brand Name","brand_name","Walmart Brand Name - en-US"],
+      "Product Title": ["Item Name","Product Name","Title"],
+      "Description": ["Long Description","Product Description","Description"]
+    }
+    ```
+    """)
+    st.markdown(instructions)
 
 st.divider()
 
@@ -206,160 +158,172 @@ with colA:
 with colB:
     onboarding_file = st.file_uploader("🧾 Upload Onboarding Sheet (.xlsx)", type=["xlsx"])
 
-st.markdown("#### 🔗 Mapping Options")
-left, right = st.columns([1, 1])
-with left:
-    use_automap = st.checkbox("Auto-map headers (no JSON needed)", value=True)
-with right:
+st.markdown("#### 🔗 Mapping JSON")
+mapping_tab1, mapping_tab2 = st.tabs(["Paste JSON", "Upload JSON file"])
+mapping_json_text = ""
+mapping_json_file = None
+with mapping_tab1:
     mapping_json_text = st.text_area(
-        "Optional: Mapping JSON (used as strong hints)",
-        height=160,
+        "Paste mapping JSON here",
+        height=220,
         placeholder='{\n  "Partner SKU": ["Seller SKU", "item_sku"]\n}',
     )
+with mapping_tab2:
+    mapping_json_file = st.file_uploader("Or upload mapping.json", type=["json"], key="mapping_file")
 
 st.divider()
-go = st.button("🔎 Build Mapping Suggestions", type="primary")
+go = st.button("🚀 Generate Final Masterfile", type="primary")
 
-# Store user choices across steps
-if "proposed_map" not in st.session_state:
-    st.session_state.proposed_map = None
-if "on_headers" not in st.session_state:
-    st.session_state.on_headers = []
-if "master_headers" not in st.session_state:
-    st.session_state.master_headers = []
-if "master_ws_meta" not in st.session_state:
-    st.session_state.master_ws_meta = None
-if "on_df" not in st.session_state:
-    st.session_state.on_df = None
+log_area = st.container()
+download_area = st.container()
 
 # =========================
-# Step 1: Propose Mapping
+# Main Action
 # =========================
 if go:
-    if not masterfile_file or not onboarding_file:
-        st.error("Please upload both **Masterfile Template** and **Onboarding Sheet**.")
-        st.stop()
+    with log_area:
+        st.markdown("### 📝 Log")
+        log = st.empty()
 
-    # Load master (styles preserved later)
-    try:
-        master_wb = load_workbook(masterfile_file, keep_links=False)
-        master_ws = master_wb.active
-    except Exception as e:
-        st.error(f"Could not read **Masterfile**: {e}")
-        st.stop()
+        def slog(msg):
+            log.markdown(msg)
 
-    # Pick best onboarding sheet
-    try:
-        best_df, best_sheet, info = pick_best_onboarding_sheet(onboarding_file)
-        st.success(f"Using onboarding sheet: **{best_sheet}** ({info})")
-    except Exception as e:
-        st.error(f"Could not read **Onboarding**: {e}")
-        st.stop()
-
-    on_df = best_df.fillna("")
-    on_df.columns = [str(c).strip() for c in on_df.columns]
-    on_headers = list(on_df.columns)
-
-    used_cols = worksheet_used_cols(master_ws, header_rows=(1, 2))
-    master_displays = [master_ws.cell(row=1, column=c).value or "" for c in range(1, used_cols + 1)]
-
-    # Optional JSON hints
-    user_json = None
-    if mapping_json_text.strip():
-        try:
-            user_json = json.loads(mapping_json_text)
-        except Exception as e:
-            st.error(f"Mapping JSON could not be parsed. Error: {e}")
+        # Validate inputs
+        if not masterfile_file or not onboarding_file:
+            st.error("Please upload both **Masterfile Template** and **Onboarding Sheet**.")
             st.stop()
 
-    # Build suggestions
-    mapping_suggestions = suggest_mapping(master_displays, on_headers, extra_mapping_json=(user_json if use_automap else None))
+        # Parse mapping JSON
+        mapping_raw = None
+        if mapping_json_text.strip():
+            try:
+                mapping_raw = json.loads(mapping_json_text)
+            except Exception as e:
+                st.error(f"Mapping JSON could not be parsed. Error: {e}")
+                st.stop()
+        elif mapping_json_file is not None:
+            try:
+                mapping_raw = json.load(mapping_json_file)
+            except Exception as e:
+                st.error(f"Mapping JSON file could not be parsed. Error: {e}")
+                st.stop()
+        else:
+            st.error("Please provide mapping JSON (paste or upload).")
+            st.stop()
 
-    # Save for step 2
-    st.session_state.master_headers = master_displays
-    st.session_state.on_headers = on_headers
-    st.session_state.proposed_map = mapping_suggestions
-    st.session_state.master_ws_meta = (master_wb, master_ws)
-    st.session_state.on_df = on_df
+        # Normalize mapping keys and keep ordered aliases
+        # mapping_aliases_by_master: { master_norm: [alias1, alias2, ...] }
+        mapping_aliases_by_master = {}
+        for k, v in mapping_raw.items():
+            aliases = v[:] if isinstance(v, list) else [v]
+            # also allow the master display itself as a fallback (end of list)
+            if k not in aliases:
+                aliases = aliases + [k]
+            mapping_aliases_by_master[norm(k)] = aliases
 
-# =========================
-# Step 2: Review & Confirm
-# =========================
-if st.session_state.proposed_map is not None:
-    st.markdown("### ✅ Review & Confirm Column Mapping")
-    on_headers = st.session_state.on_headers
-    proposed = st.session_state.proposed_map
+        slog("⏳ Reading workbooks…")
+        try:
+            # Read masterfile with openpyxl to preserve template styles
+            master_wb = load_workbook(masterfile_file, keep_links=False)
+            master_ws = master_wb.active
+        except Exception as e:
+            st.error(f"Could not read **Masterfile**: {e}")
+            st.stop()
 
-    # Build UI selects
-    chosen_map = {}
-    low_conflicts = []
+        # --- pick best onboarding sheet automatically ---
+        try:
+            best_df, best_sheet, info = pick_best_onboarding_sheet(onboarding_file, mapping_aliases_by_master)
+            st.success(f"Using onboarding sheet: **{best_sheet}** ({info})")
+        except Exception as e:
+            st.error(f"Could not find a suitable onboarding sheet: {e}")
+            st.stop()
 
-    for m in st.session_state.master_headers:
-        best_cand, conf, ranked = proposed.get(m, (None, 0.0, []))
-        # default to best candidate if any
-        default_idx = 0
-        options = ["(leave blank)"] + on_headers
-        if best_cand and best_cand in on_headers:
-            default_idx = options.index(best_cand) if best_cand in options else 0
+        on_df = best_df  # already cleaned inside picker
+        # Onboarding headers from DataFrame
+        on_headers = list(on_df.columns)
+        # Build normalized lookup for onboarding Series by header
+        series_by_alias = {norm(h): on_df[h] for h in on_headers}
 
-        col1, col2 = st.columns([1.2, 2.0])
-        with col1:
-            st.markdown(f"**{m or '(empty header)'}**")
-            choice = st.selectbox(
-                "Select onboarding column",
-                options=options,
-                index=default_idx,
-                key=f"sel_{m}_{default_idx}"
-            )
-        with col2:
-            # show top candidates with confidence
-            tips = ", ".join([f"{c} ({int(s*100)}%)" for c, s in ranked[:5]])
-            st.caption(f"Suggested: {best_cand or '—'} • Confidence: {int(conf*100)}%")
-            if tips:
-                st.caption(f"Top matches: {tips}")
-
-        if choice != "(leave blank)":
-            chosen_map[m] = choice
-        if conf < 0.65 and choice != "(leave blank)":
-            low_conflicts.append(m)
-
-    if low_conflicts:
-        st.warning("Low confidence mappings detected for: " + ", ".join([f"`{m}`" for m in low_conflicts]))
-
-    st.divider()
-    confirm = st.button("🚀 Generate Final Masterfile", type="primary")
-
-    if confirm:
-        # Write with preserved styles
-        master_wb, master_ws = st.session_state.master_ws_meta
-        on_df = st.session_state.on_df
+        # Master headers (Row 1 display, Row 2 keys)
         used_cols = worksheet_used_cols(master_ws, header_rows=(1, 2))
         master_displays = [master_ws.cell(row=1, column=c).value or "" for c in range(1, used_cols + 1)]
 
-        # Build mapping col -> Series
-        series_by_alias = {h: on_df[h] for h in on_df.columns}
-        out_row_start = 3
+        # Build master -> onboarding series map
+        master_to_source = {}   # col -> (Series) or SENTINEL_LISTING_ACTION
+        chosen_alias = {}       # col -> alias actually used (for reporting)
+        unmatched = []
+        report_lines = []
+
+        report_lines.append("#### 🔎 Mapping Summary")
+        for c, m_disp in enumerate(master_displays, start=1):
+            disp_norm = norm(m_disp)
+            if not disp_norm:
+                continue
+
+            # ordered aliases (priority) from mapping; includes the display itself as fallback
+            aliases = mapping_aliases_by_master.get(disp_norm, [m_disp])
+
+            resolved_series = None
+            resolved_alias = None
+            for a in aliases:
+                a_norm = norm(a)
+                if a_norm in series_by_alias:
+                    resolved_series = series_by_alias[a_norm]
+                    resolved_alias = a
+                    break
+
+            if resolved_series is not None:
+                master_to_source[c] = resolved_series
+                chosen_alias[c] = resolved_alias
+                report_lines.append(f"- ✅ **{m_disp}** ← `{resolved_alias}`")
+            else:
+                if disp_norm == norm("Listing Action (List or Unlist)"):
+                    master_to_source[c] = SENTINEL_LISTING_ACTION
+                    report_lines.append(f"- 🟨 **{m_disp}** ← (will fill `'List'`)")
+                else:
+                    unmatched.append(m_disp)
+                    suggestions = top_matches(m_disp, on_headers, 3)
+                    sug_txt = ", ".join(f"`{name}` ({round(sc*100,1)}%)" for sc, name in suggestions) if suggestions else "*none*"
+                    report_lines.append(f"- ❌ **{m_disp}** ← *no match*. Suggestions: {sug_txt}")
+
+        st.markdown("\n".join(report_lines))
+
+        # Write values to master starting row 3
+        slog("🛠️ Writing data…")
+        out_row = 3
         num_rows = len(on_df)
 
-        for c, m_disp in enumerate(master_displays, start=1):
-            chosen = chosen_map.get(m_disp, None)
-            if not chosen:
-                continue
-            src = series_by_alias.get(chosen)
-            if src is None:
-                continue
-            for i in range(num_rows):
-                val = "" if i >= len(src) else str(src.iloc[i])
-                master_ws.cell(row=out_row_start + i, column=c, value=val)
+        for i in range(num_rows):
+            for c in range(1, used_cols + 1):
+                src = master_to_source.get(c, None)
+                if src is None:
+                    continue
+                if src is SENTINEL_LISTING_ACTION:
+                    master_ws.cell(row=out_row + i, column=c, value="List")
+                elif isinstance(src, pd.Series):
+                    if i < len(src):
+                        # write as text to preserve things like leading zeros
+                        master_ws.cell(row=out_row + i, column=c, value=str(src.iloc[i]))
 
+        # Save to buffer
+        slog("💾 Saving…")
         bio = io.BytesIO()
         master_wb.save(bio)
         bio.seek(0)
 
-        st.success("✅ Final masterfile is ready!")
-        st.download_button(
-            "⬇️ Download Final Masterfile",
-            data=bio.getvalue(),
-            file_name="final_masterfile.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        with download_area:
+            st.success("✅ Final masterfile is ready!")
+            st.download_button(
+                "⬇️ Download Final Masterfile",
+                data=bio.getvalue(),
+                file_name="final_masterfile_real.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+            if unmatched:
+                st.info(
+                    "Some master columns had no match and were left blank:\n\n- " +
+                    "\n- ".join(unmatched)
+                )
+
+
