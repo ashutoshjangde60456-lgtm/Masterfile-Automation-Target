@@ -1,0 +1,9 @@
+# Streamlit app deps
+streamlit==1.39.0
+
+# Data handling
+pandas==2.2.2
+numpy==2.0.2
+
+# Excel read/write
+openpyxl==3.1.5
