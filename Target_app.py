@@ -4,79 +4,35 @@ import re
 import time
 import zipfile
 import xml.etree.ElementTree as ET
-from textwrap import dedent
 from pathlib import Path
 import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
 from difflib import SequenceMatcher
 
-# ─────────────────────────────────────────────────────────────────────
-# Page meta + theming
-# ─────────────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Masterfile Automation - Target",
-    page_icon="🎯",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
-
+# ── Page meta / theme ────────────────────────────────────────────────
+st.set_page_config(page_title="Masterfile Automation - Target", page_icon="🎯", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
 <style>
-:root{ 
-    --bg1:#f6f9fc; --bg2:#fff; --card:#fff; --card-border:#e8eef6;
-    --ink:#0f172a; --muted:#64748b; --accent:#cc0000; 
-}
+:root{ --bg1:#f6f9fc; --bg2:#fff; --card:#fff; --card-border:#e8eef6; --ink:#0f172a; --muted:#64748b; --accent:#cc0000; }
 .stApp{background:linear-gradient(180deg, var(--bg1) 0%, var(--bg2) 70%);}
-.block-container{padding-top:.75rem; max-width: 1200px;}
-.section{
-    border:1px solid var(--card-border);
-    background:var(--card);
-    border-radius:16px;
-    padding:18px 20px; 
-    box-shadow:0 6px 24px rgba(2,6,23,.05); 
-    margin-bottom:18px;
-}
-.badge{
-    display:inline-block;
-    padding:4px 10px;
-    border-radius:999px;
-    font-size:.82rem;
-    font-weight:600;
-    margin-right:.25rem;
-}
-.badge-info{background:#eef2ff;color:#1e40af;} 
-.badge-ok{background:#ecfdf5;color:#065f46;}
-.badge-target{background:#fff0f0;color:#cc0000;}
-div.stButton>button,.stDownloadButton>button{
-    background:var(--accent)!important;
-    color:#fff!important;
-    border-radius:10px!important;
-    border:0!important;
-    font-weight:600!important;
-    padding:0.5rem 1.5rem!important;
-    transition: all 0.3s ease!important;
-}
-div.stButton>button:hover,.stDownloadButton>button:hover{
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(204,0,0,0.3)!important;
-}
-.uploadedFile{border-radius:8px;}
+.block-container{padding-top:.75rem; max_width: 1200px;}
+.section{border:1px solid var(--card-border); background:var(--card); border-radius:16px; padding:18px 20px; box-shadow:0 6px 24px rgba(2,6,23,.05); margin-bottom:18px;}
+.badge{display:inline-block; padding:4px 10px; border-radius:999px; font-size:.82rem; font-weight:600; margin-right:.25rem;}
+.badge-info{background:#eef2ff;color:#1e40af;} .badge-ok{background:#ecfdf5;color:#065f46;} .badge-target{background:#fff0f0;color:#cc0000;}
+div.stButton>button,.stDownloadButton>button{background:var(--accent)!important;color:#fff!important;border-radius:10px!important;border:0!important;font-weight:600!important;padding:0.5rem 1.5rem!important;transition:all .3s ease!important;}
+div.stButton>button:hover,.stDownloadButton>button:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(204,0,0,0.3)!important;}
 h1{color:var(--accent);}
 </style>
 """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────────────
-# Template layout constants - TARGET SPECIFIC
-# ─────────────────────────────────────────────────────────────────────
-MASTER_TEMPLATE_SHEET = "Bulk Product Data"   # Target sheet name
-MASTER_DISPLAY_ROW    = 1                      # Headers in row 1
-MASTER_SECONDARY_ROW  = 2                      # Secondary headers row 2
-MASTER_DATA_START_ROW = 3                      # Data starts row 3
+# ── Template constants ───────────────────────────────────────────────
+MASTER_TEMPLATE_SHEET = "Bulk Product Data"
+MASTER_DISPLAY_ROW    = 1
+MASTER_SECONDARY_ROW  = 2
+MASTER_DATA_START_ROW = 3
 
-# ─────────────────────────────────────────────────────────────────────
-# XML Namespaces
-# ─────────────────────────────────────────────────────────────────────
+# ── XML namespaces ───────────────────────────────────────────────────
 XL_NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 XL_NS_REL  = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 ET.register_namespace("", XL_NS_MAIN)
@@ -84,18 +40,10 @@ ET.register_namespace("r", XL_NS_REL)
 ET.register_namespace("mc", "http://schemas.openxmlformats.org/markup-compatibility/2006")
 ET.register_namespace("x14ac", "http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac")
 
-# ─────────────────────────────────────────────────────────────────────
-# Helper Functions
-# ─────────────────────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────────
 _INVALID_XML_CHARS = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\uD800-\uDFFF]")
-
-def sanitize_xml_text(s) -> str:
-    """Remove invalid XML characters"""
-    if s is None: return ""
-    return _INVALID_XML_CHARS.sub("", str(s))
-
+def sanitize_xml_text(s): return "" if s is None else _INVALID_XML_CHARS.sub("", str(s))
 def norm(s: str) -> str:
-    """Normalize string for matching"""
     if s is None: return ""
     x = str(s).strip().lower()
     x = re.sub(r"\s*-\s*en\s*[-_ ]\s*us\s*$", "", x)
@@ -103,108 +51,70 @@ def norm(s: str) -> str:
     x = re.sub(r"[._/\\-]+", " ", x)
     x = re.sub(r"[^0-9a-z\s]+", " ", x)
     return re.sub(r"\s+", " ", x).strip()
-
 def top_matches(query, candidates, k=3):
-    """Find top k similar strings"""
     q = norm(query)
     scored = [(SequenceMatcher(None, q, norm(c)).ratio(), c) for c in candidates]
     scored.sort(key=lambda t: t[0], reverse=True)
     return scored[:k]
-
 def nonempty_rows(df: pd.DataFrame) -> int:
-    """Count non-empty rows"""
     if df.empty: return 0
     return df.replace("", pd.NA).dropna(how="all").shape[0]
-
 def worksheet_used_cols(ws, header_rows=(1,), hard_cap=2048, empty_streak_stop=8):
-    """Detect actual used columns in worksheet"""
-    max_try = min(ws.max_column, hard_cap)
-    last_nonempty, streak = 0, 0
+    max_try = min(ws.max_column, hard_cap); last_nonempty=0; streak=0
     for c in range(1, max_try + 1):
         any_val = any((ws.cell(row=r, column=c).value not in (None, "")) for r in header_rows)
-        if any_val: 
-            last_nonempty, streak = c, 0
+        if any_val: last_nonempty, streak = c, 0
         else:
             streak += 1
-            if streak >= empty_streak_stop: 
-                break
+            if streak >= empty_streak_stop: break
     return max(last_nonempty, 1)
-
 def _col_letter(n: int) -> str:
-    """Convert column number to letter (1 -> A, 27 -> AA)"""
-    s = ""
-    while n:
-        n, r = divmod(n-1, 26)
-        s = chr(65+r) + s
+    s=""; 
+    while n: n,r=divmod(n-1,26); s=chr(65+r)+s
     return s
-
 def _col_number(letters: str) -> int:
-    """Convert column letter to number (A -> 1, AA -> 27)"""
-    n = 0
+    n=0
     for ch in letters:
         if not ch.isalpha(): break
-        n = n * 26 + (ord(ch.upper()) - 64)
+        n = n*26 + (ord(ch.upper())-64)
     return n
-
-def safe_filename(name: str, fallback: str = "final_masterfile") -> str:
-    """Sanitize filename"""
-    if name is None:
-        return fallback
-    name = name.strip()
-    name = re.sub(r"[^A-Za-z0-9._ -]+", "", name)
+def safe_filename(name: str, fallback: str = "final_masterfile"):
+    if name is None: return fallback
+    name = re.sub(r"[^A-Za-z0-9._ -]+", "", name.strip())
     return name or fallback
 
-# ─────────────────────────────────────────────────────────────────────
-# ZIP / XML Processing Functions
-# ─────────────────────────────────────────────────────────────────────
+# ── ZIP / XML helpers ────────────────────────────────────────────────
 def _find_sheet_part_path(z: zipfile.ZipFile, sheet_name: str) -> str:
-    """Find XML path for specific sheet"""
     wb_xml = ET.fromstring(z.read("xl/workbook.xml"))
     rels_xml = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
-    
-    rid = None
+    rid=None
     for sh in wb_xml.find(f"{{{XL_NS_MAIN}}}sheets"):
-        if sh.attrib.get("name") == sheet_name:
-            rid = sh.attrib.get(f"{{{XL_NS_REL}}}id")
-            break
-    
-    if not rid: 
-        raise ValueError(f"Sheet '{sheet_name}' not found in workbook.")
-    
-    target = None
+        if sh.attrib.get("name")==sheet_name:
+            rid=sh.attrib.get(f"{{{XL_NS_REL}}}id"); break
+    if not rid: raise ValueError(f"Sheet '{sheet_name}' not found in workbook.")
+    target=None
     for rel in rels_xml:
-        if rel.attrib.get("Id") == rid:
-            target = rel.attrib.get("Target")
-            break
-    
-    if not target: 
-        raise ValueError(f"Relationship for sheet '{sheet_name}' not found.")
-    
-    target = target.replace("\\", "/")
-    if target.startswith("../"): target = target[3:]
-    if not target.startswith("xl/"): target = "xl/" + target
-    
+        if rel.attrib.get("Id")==rid:
+            target=rel.attrib.get("Target"); break
+    if not target: raise ValueError(f"Relationship for sheet '{sheet_name}' not found.")
+    target = target.replace("\\","/")
+    if target.startswith("../"): target=target[3:]
+    if not target.startswith("xl/"): target="xl/"+target
     return target
 
 def _get_table_paths_for_sheet(z: zipfile.ZipFile, sheet_path: str) -> list:
-    """Get all table XML paths for a sheet"""
-    rels_path = sheet_path.replace("worksheets/", "worksheets/_rels/").replace(".xml", ".xml.rels")
-    if rels_path not in z.namelist(): 
-        return []
-    
-    root = ET.fromstring(z.read(rels_path))
-    out = []
+    rels_path = sheet_path.replace("worksheets/","worksheets/_rels/").replace(".xml",".xml.rels")
+    if rels_path not in z.namelist(): return []
+    root = ET.fromstring(z.read(rels_path)); out=[]
     for rel in root:
-        t = rel.attrib.get("Type", "")
-        if t.endswith("/table"):
-            target = rel.attrib.get("Target", "").replace("\\", "/")
-            if target.startswith("../"): target = target[3:]
-            if not target.startswith("xl/"): target = "xl/" + target
+        if rel.attrib.get("Type","").endswith("/table"):
+            target = rel.attrib.get("Target","").replace("\\","/")
+            if target.startswith("../"): target=target[3:]
+            if not target.startswith("xl/"): target="xl/"+target
             out.append(target)
     return out
 
 def _read_table_cols_count(table_xml_bytes: bytes) -> int:
-    """Read column count from table XML"""
     try:
         root = ET.fromstring(table_xml_bytes)
         tcols = root.find(f"{{{XL_NS_MAIN}}}tableColumns")
@@ -217,78 +127,66 @@ def _read_table_cols_count(table_xml_bytes: bytes) -> int:
         return 0
 
 def _union_dimension(orig_dim_ref: str, used_cols: int, last_row: int) -> str:
-    """Calculate union of dimensions"""
     try:
         _, right = orig_dim_ref.split(":", 1)
         m = re.match(r"([A-Z]+)(\d+)", right)
         if m:
-            orig_last_col = _col_number(m.group(1))
-            orig_last_row = int(m.group(2))
+            orig_last_col=_col_number(m.group(1)); orig_last_row=int(m.group(2))
         else:
-            orig_last_col, orig_last_row = used_cols, last_row
+            orig_last_col,orig_last_row=used_cols,last_row
     except Exception:
-        orig_last_col, orig_last_row = used_cols, last_row
-    
-    u_last_col = max(orig_last_col, used_cols)
-    u_last_row = max(orig_last_row, last_row)
+        orig_last_col,orig_last_row=used_cols,last_row
+    u_last_col=max(orig_last_col,used_cols); u_last_row=max(orig_last_row,last_row)
     return f"A1:{_col_letter(u_last_col)}{u_last_row}"
 
 def _ensure_ws_x14ac(root):
-    """Ensure x14ac namespace is ignorable"""
-    root.set("{http://schemas.openxmlformats.org/markup-compatibility/2006}Ignorable", "x14ac")
+    root.set("{http://schemas.openxmlformats.org/markup-compatibility/2006}Ignorable","x14ac")
 
 def _intersects_range(a1: str, r1: int, r2: int) -> bool:
-    """Check if range intersects with row range"""
     m = re.match(r"^[A-Z]+(\d+):[A-Z]+(\d+)$", a1 or "", re.I)
-    if not m:
-        return False
-    lo = int(m.group(1))
-    hi = int(m.group(2))
-    if lo > hi: lo, hi = hi, lo
-    return not (hi < r1 or lo > r2)
+    if not m: return False
+    lo=int(m.group(1)); hi=int(m.group(2))
+    if lo>hi: lo,hi=hi,lo
+    return not (hi<r1 or lo>r2)
 
+# ── Writer (non-empty inlineStr cells only) ──────────────────────────
 def _patch_sheet_xml(sheet_xml_bytes: bytes, header_row: int, start_row: int, used_cols_final: int, block_2d: list) -> bytes:
-    """Patch sheet XML with new data"""
     root = ET.fromstring(sheet_xml_bytes)
     _ensure_ws_x14ac(root)
-    
+
     sheetData = root.find(f"{{{XL_NS_MAIN}}}sheetData")
     if sheetData is None:
         sheetData = ET.SubElement(root, f"{{{XL_NS_MAIN}}}sheetData")
-    
-    # Remove existing data rows
+
     for row in list(sheetData):
-        try:
-            r = int(row.attrib.get("r") or "0")
-        except Exception:
-            r = 0
+        try: r = int(row.attrib.get("r") or "0")
+        except Exception: r = 0
         if r >= start_row:
             sheetData.remove(row)
-    
-    # Remove intersecting merge cells
+
     mergeCells = root.find(f"{{{XL_NS_MAIN}}}mergeCells")
     if mergeCells is not None:
         for mc in list(mergeCells):
-            ref = mc.attrib.get("ref", "")
-            if _intersects_range(ref, start_row, 1048576):
+            if _intersects_range(mc.attrib.get("ref",""), start_row, 1048576):
                 mergeCells.remove(mc)
         if len(list(mergeCells)) == 0:
             root.remove(mergeCells)
-    
-    # Add new data rows
+
     row_span = f"1:{used_cols_final}" if used_cols_final > 0 else "1:1"
     n_rows = len(block_2d)
-    
+
     for i in range(n_rows):
         r = start_row + i
         src_row = block_2d[i]
         row_el = ET.Element(f"{{{XL_NS_MAIN}}}row", r=str(r))
         row_el.set("spans", row_span)
         row_el.set("{http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac}dyDescent", "0.25")
-        
+
         for j in range(used_cols_final):
             val = src_row[j] if j < len(src_row) else ""
-            txt = sanitize_xml_text(val) if val else ""
+            txt = sanitize_xml_text(val).strip() if val else ""
+            if not txt:
+                continue
             col = _col_letter(j + 1)
             c = ET.Element(f"{{{XL_NS_MAIN}}}c", r=f"{col}{r}", t="inlineStr")
             is_el = ET.SubElement(c, f"{{{XL_NS_MAIN}}}is")
@@ -296,113 +194,77 @@ def _patch_sheet_xml(sheet_xml_bytes: bytes, header_row: int, start_row: int, us
             t_el.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
             t_el.text = txt
             row_el.append(c)
-        
+
         sheetData.append(row_el)
-    
-    # Update dimension
+
     dim = root.find(f"{{{XL_NS_MAIN}}}dimension")
     if dim is None:
         dim = ET.SubElement(root, f"{{{XL_NS_MAIN}}}dimension", ref="A1:A1")
-    
     last_row = max(header_row, start_row + max(0, n_rows) - 1)
-    new_ref = _union_dimension(dim.attrib.get("ref", "A1:A1"), used_cols_final, last_row)
-    dim.set("ref", new_ref)
-    
-    # Update autoFilter if exists
+    dim.set("ref", _union_dimension(dim.attrib.get("ref", "A1:A1"), used_cols_final, last_row))
+
     af = root.find(f"{{{XL_NS_MAIN}}}autoFilter")
     if af is not None:
         af.set("ref", f"A{header_row}:{_col_letter(used_cols_final)}{last_row}")
-    
-    # Clear filterMode
+
     sheetPr = root.find(f"{{{XL_NS_MAIN}}}sheetPr")
     if sheetPr is not None and sheetPr.attrib.get("filterMode"):
         sheetPr.attrib.pop("filterMode", None)
-    
+
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 def _patch_table_xml(table_xml_bytes: bytes, header_row: int, last_row: int, last_col_n: int) -> bytes:
-    """Patch table XML with new dimensions"""
     root = ET.fromstring(table_xml_bytes)
     new_ref = f"A{header_row}:{_col_letter(last_col_n)}{last_row}"
     root.set("ref", new_ref)
-    
-    af = root.find(f"{{{XL_NS_MAIN}}}autoFilter")
-    if af is None:
-        af = ET.SubElement(root, f"{{{XL_NS_MAIN}}}autoFilter")
+    af = root.find(f"{{{XL_NS_MAIN}}}autoFilter") or ET.SubElement(root, f"{{{XL_NS_MAIN}}}autoFilter")
     af.set("ref", new_ref)
-    
     tcols = root.find(f"{{{XL_NS_MAIN}}}tableColumns")
     if tcols is not None:
-        child_count = sum(1 for _ in tcols)
-        tcols.set("count", str(child_count))
-    
+        tcols.set("count", str(sum(1 for _ in tcols)))
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 def _strip_calcchain_override(ct_bytes: bytes) -> bytes:
-    """Remove calcChain from content types"""
     try:
-        ns = "http://schemas.openxmlformats.org/package/2006/content-types"
-        root = ET.fromstring(ct_bytes)
-        ET.register_namespace("", ns)
+        ns="http://schemas.openxmlformats.org/package/2006/content-types"
+        root=ET.fromstring(ct_bytes); ET.register_namespace("", ns)
         for el in list(root):
-            if el.tag == f"{{{ns}}}Override" and el.attrib.get("PartName","").lower() == "/xl/calcchain.xml":
+            if el.tag==f"{{{ns}}}Override" and el.attrib.get("PartName","").lower()=="/xl/calcchain.xml":
                 root.remove(el)
         return ET.tostring(root, encoding="utf-8", xml_declaration=True)
     except Exception:
         return ct_bytes
 
 def fast_patch_template(master_bytes: bytes, sheet_name: str, header_row: int, start_row: int, used_cols: int, block_2d: list) -> bytes:
-    """Ultra-fast XML-based template patching"""
     zin = zipfile.ZipFile(io.BytesIO(master_bytes), "r")
     sheet_path = _find_sheet_part_path(zin, sheet_name)
     table_paths = _get_table_paths_for_sheet(zin, sheet_path)
-    
-    # Get maximum columns from tables
     max_cols = used_cols
     for tp in table_paths:
         try:
-            cnt = _read_table_cols_count(zin.read(tp))
-            if cnt > max_cols: max_cols = cnt
-        except Exception:
-            pass
-    
-    # Patch sheet XML
+            cnt=_read_table_cols_count(zin.read(tp))
+            if cnt>max_cols: max_cols=cnt
+        except: pass
     new_sheet_xml = _patch_sheet_xml(zin.read(sheet_path), header_row, start_row, max_cols, block_2d)
     last_row = max(header_row, start_row + max(0, len(block_2d)) - 1)
-    
-    # Patch table XMLs
-    patched_tables = {}
+    patched_tables={}
     for tp in table_paths:
-        try:
-            patched_tables[tp] = _patch_table_xml(zin.read(tp), header_row, last_row, max_cols)
-        except Exception:
-            pass
-    
-    # Write new ZIP
+        try: patched_tables[tp]=_patch_table_xml(zin.read(tp), header_row, last_row, max_cols)
+        except: pass
     out_bio = io.BytesIO()
     with zipfile.ZipFile(out_bio, "w", zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
-            fn = item.filename
-            if fn == sheet_path:
-                zout.writestr(item, new_sheet_xml)
-            elif fn in patched_tables:
-                zout.writestr(item, patched_tables[fn])
-            elif fn.lower() == "[content_types].xml":
-                zout.writestr(item, _strip_calcchain_override(zin.read(fn)))
-            elif fn.lower() == "xl/calcchain.xml":
-                continue  # Skip calcChain
-            else:
-                zout.writestr(item, zin.read(fn))
-    
-    zin.close()
-    out_bio.seek(0)
-    return out_bio.getvalue()
+            fn=item.filename
+            if fn==sheet_path: zout.writestr(item, new_sheet_xml)
+            elif fn in patched_tables: zout.writestr(item, patched_tables[fn])
+            elif fn.lower()=="[content_types].xml": zout.writestr(item, _strip_calcchain_override(zin.read(fn)))
+            elif fn.lower()=="xl/calcchain.xml": continue
+            else: zout.writestr(item, zin.read(fn))
+    zin.close(); out_bio.seek(0); return out_bio.getvalue()
 
-# ─────────────────────────────────────────────────────────────────────
-# UI - Main Application
-# ─────────────────────────────────────────────────────────────────────
+# ── UI ───────────────────────────────────────────────────────────────
 st.title("🎯 Masterfile Automation – Target")
-st.caption("Ultra-fast XML writer. Preserves all sheets (Bulk Product Data, Dietary Supplements, Report Details), styles, formulas, and macros.")
+st.caption("Ultra-fast XML writer. Preserves all sheets, styles, formulas, macros.")
 
 st.markdown("<div class='section'><span class='badge badge-target'>Target Marketplace</span> "
             "<span class='badge badge-info'>Template-only writer</span> "
@@ -413,409 +275,197 @@ st.markdown("### 📤 Upload Files")
 
 c1, c2 = st.columns([1, 1])
 with c1:
-    masterfile_file = st.file_uploader(
-        "📄 Masterfile Template (.xlsx / .xlsm)", 
-        type=["xlsx", "xlsm"],
-        help="Upload your Target masterfile template with 3 sheets"
-    )
+    masterfile_file = st.file_uploader("📄 Masterfile Template (.xlsx / .xlsm)", type=["xlsx","xlsm"], help="Upload your Target masterfile template")
 with c2:
-    onboarding_file = st.file_uploader(
-        "🧾 Onboarding Sheet (.xlsx)", 
-        type=["xlsx"],
-        help="Upload the onboarding data to be mapped"
-    )
+    onboarding_file = st.file_uploader("🧾 Onboarding Sheet (.xlsx)", type=["xlsx"], help="Upload the onboarding data")
 
+# ── FILTER UI (FIRST COLUMN ONLY) ────────────────────────────────────
+st.markdown("#### 🔎 Row filter (by category)")
+if onboarding_file is not None:
+    try:
+        xl = pd.ExcelFile(onboarding_file)
+        preview = xl.parse(xl.sheet_names[0], header=0, dtype=str, nrows=200).fillna("")
+        preview.columns = [str(c).strip() for c in preview.columns]
+        if len(preview.columns) > 0:
+            first_col = preview.columns[0]
+            st.caption(f"Using onboarding column **{first_col}**")
+            vals = sorted({str(v).strip() for v in preview[first_col].astype(str) if str(v).strip() not in ("","nan","none")})
+            defaults = []
+            if masterfile_file is not None:
+                fname = (masterfile_file.name or "").lower()
+                defaults = [v for v in vals if v.lower() in fname]
+            chosen = st.multiselect("Include only these values from column A", options=vals, default=defaults)
+            # persist for processing step
+            st.session_state.cat_col = first_col
+            st.session_state.cat_values = chosen
+        else:
+            st.info("No columns found in the first sheet of onboarding.")
+    except Exception:
+        st.info("Upload a valid onboarding file to enable category filtering.")
+else:
+    st.info("Upload the onboarding file to enable category filtering.")
+
+# ── Mapping JSON / Output UI ─────────────────────────────────────────
 st.markdown("#### 🔗 Mapping JSON")
 st.caption("Define how onboarding columns map to masterfile headers")
 
 tab1, tab2 = st.tabs(["📝 Paste JSON", "📁 Upload JSON"])
 mapping_json_text, mapping_json_file = "", None
-
 with tab1:
     mapping_json_text = st.text_area(
-        "Paste mapping JSON", 
-        height=200,
+        "Paste mapping JSON", height=200,
         placeholder='{\n  "TCIN": ["tcin", "item_id"],\n  "Product Title": ["title", "product_name"],\n  "Product Description": ["description", "desc"]\n}',
         help="Map master headers to possible onboarding column names"
     )
-
 with tab2:
-    mapping_json_file = st.file_uploader(
-        "Or upload mapping.json", 
-        type=["json"], 
-        key="mapping_file",
-        help="Upload a JSON file with column mappings"
-    )
+    mapping_json_file = st.file_uploader("Or upload mapping.json", type=["json"], key="mapping_file", help="Upload a JSON file with column mappings")
 
 st.markdown("#### 📝 Output Settings")
-final_name_input = st.text_input(
-    "Final file name (without extension)",
-    value="target_final_masterfile",
-    help="We'll add .xlsx or .xlsm automatically based on your template",
-    max_chars=100
-)
-
+final_name_input = st.text_input("Final file name (without extension)", value="target_final_masterfile", help="Extension added automatically", max_chars=100)
 st.markdown("</div>", unsafe_allow_html=True)
 
 st.divider()
-
 go = st.button("🚀 Generate Final Masterfile", type="primary", use_container_width=True)
 
-# ─────────────────────────────────────────────────────────────────────
-# Processing Logic
-# ─────────────────────────────────────────────────────────────────────
-SENTINEL_LIST = object()
-
+# ── Processing ───────────────────────────────────────────────────────
 if go:
+    overall_t0 = time.time()
     st.markdown("<div class='section'>", unsafe_allow_html=True)
     st.markdown("### 📝 Processing Log")
-    
-    log_container = st.empty()
-    progress_bar = st.progress(0)
-    
+    log_container = st.empty(); progress_bar = st.progress(0)
     def slog(msg, progress=None):
         log_container.markdown(msg)
-        if progress is not None:
-            progress_bar.progress(progress)
-    
-    # Validation
+        if progress is not None: progress_bar.progress(progress)
+
     if not masterfile_file or not onboarding_file:
         st.error("❌ Please upload both **Masterfile Template** and **Onboarding** files.")
-        st.markdown("</div>", unsafe_allow_html=True)
-        st.stop()
-    
+        st.markdown("</div>", unsafe_allow_html=True); st.stop()
     try:
-        # Get file extension
         ext = (Path(masterfile_file.name).suffix or ".xlsx").lower()
-        mime_map = {
-            ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
-        }
-        out_mime = mime_map.get(ext, mime_map[".xlsx"])
-        
-        # Parse mapping JSON
+        mime_map = {".xlsx":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsm":"application/vnd.ms-excel.sheet.macroEnabled.12"}
+
+        # Step 1: mapping JSON
         slog("⏳ **Step 1/6:** Parsing mapping JSON...", 0.1)
         try:
-            if mapping_json_text.strip():
-                mapping_raw = json.loads(mapping_json_text)
-            elif mapping_json_file:
-                mapping_raw = json.load(mapping_json_file)
-            else:
-                st.error("❌ Please provide mapping JSON (paste or upload).")
-                st.markdown("</div>", unsafe_allow_html=True)
-                st.stop()
+            if mapping_json_text.strip(): mapping_raw = json.loads(mapping_json_text)
+            elif mapping_json_file: mapping_raw = json.load(mapping_json_file)
+            else: st.error("❌ Please provide mapping JSON (paste or upload)."); st.markdown("</div>", unsafe_allow_html=True); st.stop()
         except json.JSONDecodeError as e:
-            st.error(f"❌ Invalid JSON format: {e}")
-            st.markdown("</div>", unsafe_allow_html=True)
-            st.stop()
-        
+            st.error(f"❌ Invalid JSON format: {e}"); st.markdown("</div>", unsafe_allow_html=True); st.stop()
         if not isinstance(mapping_raw, dict):
-            st.error("❌ Mapping JSON must be an object: {\"Master header\": [aliases...]}.")
-            st.markdown("</div>", unsafe_allow_html=True)
-            st.stop()
-        
-        # Normalize mapping
+            st.error('❌ Mapping JSON must be an object: {"Master header": [aliases...]}'); st.markdown("</div>", unsafe_allow_html=True); st.stop()
         mapping_aliases = {}
         for k, v in mapping_raw.items():
             aliases = v[:] if isinstance(v, list) else [v]
             if k not in aliases: aliases.append(k)
             mapping_aliases[norm(k)] = aliases
-        
         slog(f"✅ Loaded {len(mapping_aliases)} header mappings", 0.2)
-        
-        # Read template headers
+
+        # Step 2: template headers
         slog("⏳ **Step 2/6:** Reading template headers...", 0.3)
-        masterfile_file.seek(0)
-        master_bytes = masterfile_file.read()
-        
-        t0 = time.time()
+        masterfile_file.seek(0); master_bytes = masterfile_file.read()
         wb_ro = load_workbook(io.BytesIO(master_bytes), read_only=True, data_only=True, keep_links=True)
-        
         if MASTER_TEMPLATE_SHEET not in wb_ro.sheetnames:
-            available_sheets = ", ".join(wb_ro.sheetnames)
-            st.error(f"❌ Sheet **'{MASTER_TEMPLATE_SHEET}'** not found. Available sheets: {available_sheets}")
-            st.markdown("</div>", unsafe_allow_html=True)
-            st.stop()
-        
+            st.error(f"❌ Sheet **'{MASTER_TEMPLATE_SHEET}'** not found. Available: {', '.join(wb_ro.sheetnames)}"); st.markdown("</div>", unsafe_allow_html=True); st.stop()
         ws_ro = wb_ro[MASTER_TEMPLATE_SHEET]
-        used_cols = worksheet_used_cols(ws_ro, header_rows=(MASTER_DISPLAY_ROW, MASTER_SECONDARY_ROW), hard_cap=2048, empty_streak_stop=8)
+        used_cols = worksheet_used_cols(ws_ro, header_rows=(MASTER_DISPLAY_ROW, MASTER_SECONDARY_ROW))
         display_headers   = [ws_ro.cell(row=MASTER_DISPLAY_ROW,   column=c).value or "" for c in range(1, used_cols+1)]
         secondary_headers = [ws_ro.cell(row=MASTER_SECONDARY_ROW, column=c).value or "" for c in range(1, used_cols+1)]
         wb_ro.close()
-        
-        slog(f"✅ Loaded {used_cols} columns from template in {time.time()-t0:.2f}s", 0.4)
-        
-        # Read onboarding sheet
+        slog(f"✅ Loaded {used_cols} template columns", 0.4)
+
+        # Step 3: read onboarding (best sheet)
         slog("⏳ **Step 3/6:** Analyzing onboarding sheet...", 0.5)
-        try:
-            best_xl = pd.ExcelFile(onboarding_file)
-            best, best_score, best_info = None, -1, ""
-            
-            for sheet in best_xl.sheet_names:
-                try:
-                    df = best_xl.parse(sheet_name=sheet, header=0, dtype=str).fillna("")
-                    df.columns = [str(c).strip() for c in df.columns]
-                except Exception:
-                    continue
-                
-                header_set = {norm(c) for c in df.columns}
-                matches = sum(any(norm(a) in header_set for a in aliases)
-                             for aliases in mapping_aliases.values())
-                rows = nonempty_rows(df)
-                score = matches + (0.01 if rows > 0 else 0.0)
-                
-                if score > best_score:
-                    best, best_score = (df, sheet), score
-                    best_info = f"{matches} matched headers, {rows} non-empty rows"
-            
-            if best is None:
-                raise ValueError("No readable onboarding sheet found with matching headers.")
-            
-            best_df, best_sheet, info = best[0], best[1], best_info
-            
-        except Exception as e:
-            st.error(f"❌ Onboarding file error: {e}")
-            st.markdown("</div>", unsafe_allow_html=True)
-            st.stop()
-        
-        on_df = best_df.fillna("")
+        best_xl = pd.ExcelFile(onboarding_file)
+        best, best_score, best_info = None, -1, ""
+        for sheet in best_xl.sheet_names:
+            try:
+                df = best_xl.parse(sheet_name=sheet, header=0, dtype=str).fillna("")
+                df.columns = [str(c).strip() for c in df.columns]
+            except Exception:
+                continue
+            header_set = {norm(c) for c in df.columns}
+            matches = sum(any(norm(a) in header_set for a in aliases) for aliases in mapping_aliases.values())
+            rows = nonempty_rows(df); score = matches + (0.01 if rows>0 else 0.0)
+            if score > best_score:
+                best, best_score = (df, sheet), score
+                best_info = f"{matches} matched headers, {rows} non-empty rows"
+        if best is None: st.error("❌ No readable onboarding sheet found with matching headers."); st.markdown("</div>", unsafe_allow_html=True); st.stop()
+
+        on_df = best[0].fillna("")
         on_df.columns = [str(c).strip() for c in on_df.columns]
         on_headers = list(on_df.columns)
-        
-        st.success(f"✅ Using onboarding sheet: **{best_sheet}** ({info})")
-        
-        # Build mapping
+        st.success(f"✅ Using onboarding sheet: **{best[1]}** ({best_info})")
+
+        # Step 3.5: apply category filter (FIRST COLUMN ONLY)
+        cat_col = st.session_state.get("cat_col")
+        cat_vals = st.session_state.get("cat_values")
+        if cat_col and cat_col in on_df.columns and cat_vals:
+            before = len(on_df)
+            on_df = on_df[on_df[cat_col].astype(str).str.strip().isin(cat_vals)].copy()
+            st.info(f"Filtering on **{cat_col}** ∈ {cat_vals} → kept {len(on_df)}/{before} rows.")
+        elif cat_col and cat_col in on_df.columns:
+            st.warning("No category values selected — no filtering applied.")
+        else:
+            st.warning("No category column detected — no filtering applied.")
+
+        # Step 4: mapping
         slog("⏳ **Step 4/6:** Mapping columns...", 0.6)
         series_by_alias = {norm(h): on_df[h] for h in on_headers}
         report_lines = ["#### 🔎 Column Mapping Results"]
-        
-        master_to_source = {}
-        matched_count = 0
-        unmatched_count = 0
-        
+        master_to_source = {}; matched_count=0; unmatched_count=0
         for c, (disp, sec) in enumerate(zip(display_headers, secondary_headers), start=1):
-            disp_norm = norm(disp)
-            
-            # For Target, use display header only
-            effective_header = disp
-            label_for_log = disp
-            eff_norm = disp_norm
-            
-            if not eff_norm: 
-                continue
-            
-            aliases = mapping_aliases.get(eff_norm, [effective_header])
-            resolved = None
-            matched_alias = None
-            
+            eff = disp; eff_norm = norm(eff)
+            if not eff_norm: continue
+            aliases = mapping_aliases.get(eff_norm, [eff])
+            resolved=None; matched_alias=None
             for a in aliases:
                 s = series_by_alias.get(norm(a))
-                if s is not None:
-                    resolved = s
-                    matched_alias = a
-                    break
-            
+                if s is not None: resolved=s; matched_alias=a; break
             if resolved is not None:
-                master_to_source[c] = resolved
-                report_lines.append(f"- ✅ **{label_for_log}** ← `{matched_alias}`")
-                matched_count += 1
+                master_to_source[c]=resolved; matched_count+=1
+                report_lines.append(f"- ✅ **{eff}** ← `{matched_alias}`")
             else:
-                sugg = top_matches(effective_header, on_headers, 3)
-                sug_txt = ", ".join(f"`{name}` ({round(sc*100,1)}%)" for sc, name in sugg) if sugg else "*none*"
-                report_lines.append(f"- ❌ **{label_for_log}** ← _no match_. Suggestions: {sug_txt}")
-                unmatched_count += 1
-        
+                sugg = top_matches(eff, on_headers, 3)
+                sug_txt = ", ".join(f"`{name}` ({round(sc*100,1)}%)" for sc,name in sugg) if sugg else "*none*"
+                report_lines.append(f"- ❌ **{eff}** ← _no match_. Suggestions: {sug_txt}"); unmatched_count+=1
         st.markdown("\n".join(report_lines))
         st.info(f"📊 Mapping Stats: **{matched_count} matched**, **{unmatched_count} unmatched** out of {len(display_headers)} total columns")
-        
-        # Build data block
+
+        # Step 5: build data block
         slog("⏳ **Step 5/6:** Building data block...", 0.7)
         n_rows = len(on_df)
         block = [[""] * used_cols for _ in range(n_rows)]
-        
         for col, src in master_to_source.items():
-            vals = src.astype(str).tolist()
-            m = min(len(vals), n_rows)
+            vals = src.astype(str).tolist(); m=min(len(vals), n_rows)
             for i in range(m):
                 v = sanitize_xml_text(vals[i].strip())
-                if v and v.lower() not in ("nan", "none", ""):
+                if v and v.lower() not in ("nan","none",""):
                     block[i][col-1] = v
-        
         slog(f"✅ Built data block: {n_rows} rows × {used_cols} columns", 0.8)
-        
-        # Write output file
+
+        # Step 6: write file
         slog("⏳ **Step 6/6:** Writing final masterfile via fast XML...", 0.85)
-        t_write = time.time()
-        
-        out_bytes = fast_patch_template(
-            master_bytes=master_bytes,
-            sheet_name=MASTER_TEMPLATE_SHEET,
-            header_row=MASTER_DISPLAY_ROW,
-            start_row=MASTER_DATA_START_ROW,
-            used_cols=used_cols,
-            block_2d=block
-        )
-        
-        write_time = time.time() - t_write
-        slog(f"✅ **Complete!** Generated in {write_time:.2f}s", 1.0)
-        
-        # Download button
+        out_bytes = fast_patch_template(master_bytes=master_bytes, sheet_name=MASTER_TEMPLATE_SHEET,
+                                        header_row=MASTER_DISPLAY_ROW, start_row=MASTER_DATA_START_ROW,
+                                        used_cols=used_cols, block_2d=block)
+        st.success("🎉 **Complete!**")
         final_base = safe_filename(final_name_input, fallback="target_final_masterfile")
         final_filename = f"{final_base}{ext}"
-        
-        st.success(f"🎉 **Success!** Your masterfile is ready: `{final_filename}`")
-        
-        st.download_button(
-            label="⬇️ Download Final Masterfile",
-            data=out_bytes,
-            file_name=final_filename,
-            mime=out_mime,
-            key="dl_final_fast",
-            use_container_width=True
-        )
-        
-        # Stats summary
+        st.download_button("⬇️ Download Final Masterfile", data=out_bytes, file_name=final_filename,
+                           mime=mime_map.get(ext, mime_map[".xlsx"]), key="dl_final_fast", use_container_width=True)
+
+        # ✅ Summary metrics
         st.markdown("---")
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Total Rows", f"{n_rows:,}")
-        with col2:
-            st.metric("Total Columns", f"{used_cols}")
-        with col3:
-            st.metric("Matched", f"{matched_count}")
-        with col4:
-            st.metric("Processing Time", f"{write_time:.2f}s")
-        
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: st.metric("Total Rows", f"{n_rows:,}")
+        with c2: st.metric("Total Columns", f"{used_cols}")
+        with c3: st.metric("Matched", f"{matched_count}")
+        with c4: st.metric("Processing Time", f"{time.time()-overall_t0:.2f}s")
+
     except Exception as e:
         st.error(f"❌ **Error:** {str(e)}")
-        with st.expander("🐛 See full error details"):
-            st.exception(e)
-    
+        with st.expander("🐛 See full error details"): st.exception(e)
     finally:
         st.markdown("</div>", unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────────────────────────────
-# Help Section
-# ─────────────────────────────────────────────────────────────────────
-with st.expander("📘 How to Use This Tool", expanded=False):
-    st.markdown(dedent(f"""
-    ## 🎯 Target Masterfile Automation Guide
-    
-    ### What This Tool Does
-    - ✅ Fills data into **{MASTER_TEMPLATE_SHEET}** sheet only
-    - ✅ Preserves other sheets: **Dietary Supplements**, **Report Details**
-    - ✅ Maintains all formatting, formulas, and macros
-    - ✅ Uses ultra-fast XML processing (seconds, not minutes)
-    
-    ### Template Requirements
-    - Must contain sheet: **{MASTER_TEMPLATE_SHEET}**
-    - Headers in **Row {MASTER_DISPLAY_ROW}**
-    - Data starts from **Row {MASTER_DATA_START_ROW}**
-    - Supports both .xlsx and .xlsm formats
-    
-    ### Step-by-Step Usage
-    
-    1. **Upload Masterfile Template**
-       - Your Target template with 3 sheets
-       - Can be .xlsx or .xlsm format
-    
-    2. **Upload Onboarding Sheet**
-       - Contains source data to map
-       - Must be .xlsx format
-       - Tool auto-selects best sheet
-    
-    3. **Provide Mapping JSON**
-       - Either paste or upload
-       - Format example:
-       ```json
-       {{
-         "TCIN": ["tcin", "target_item_id"],
-         "Product Title": ["title", "product_name"],
-         "Product Description": ["description", "long_desc"],
-         "Brand": ["brand_name", "manufacturer"]
-       }}
-       ```
-    
-    4. **Enter Output Filename** (optional)
-       - Custom name for your file
-       - Extension added automatically
-    
-    5. **Click Generate**
-       - Processing takes 2-5 seconds
-       - Download button appears when ready
-    
-    ### Mapping JSON Guide
-    
-    **Structure:**
-    - **Key:** Master template header (exact name from Row 1)
-    - **Value:** Array of possible onboarding column names
-    
-    **Tips:**
-    - Tool uses fuzzy matching for flexibility
-    - Include common variations in aliases
-    - Case-insensitive matching
-    - Ignores special characters and spaces
-    
-    ### Troubleshooting
-    
-    **"Sheet not found" error:**
-    - Ensure your template has "{MASTER_TEMPLATE_SHEET}" sheet
-    - Check spelling and spaces in sheet name
-    
-    **Low match rate:**
-    - Review mapping JSON
-    - Check onboarding column names
-    - Use suggestions from mapping results
-    
-    **Processing fails:**
-    - Verify files aren't corrupted
-    - Check file formats (.xlsx/.xlsm)
-    - Ensure mapping JSON is valid
-    
-    ### Performance Notes
-    - Processes 1,000 rows: ~2 seconds
-    - Processes 10,000 rows: ~5 seconds
-    - Processes 50,000 rows: ~15 seconds
-    
-    ### Technical Details
-    - Uses direct XML manipulation
-    - Preserves all Excel features
-    - No data loss or corruption
-    - Maintains file integrity
-    """))
-
-with st.expander("💡 Example Mapping JSON", expanded=False):
-    st.markdown("### Sample Mapping for Target")
-    st.code('''
-{
-  "TCIN": ["tcin", "item_id", "product_id"],
-  "Product Title": ["title", "product_name", "item_title"],
-  "Product Description": ["description", "long_description", "desc"],
-  "Brand": ["brand", "brand_name", "manufacturer"],
-  "Item Type": ["type", "item_type", "product_type"],
-  "Product Dimensions": ["dimensions", "size", "product_size"],
-  "Weight": ["weight", "shipping_weight", "item_weight"],
-  "Color": ["color", "colour", "item_color"],
-  "Material": ["material", "fabric", "item_material"],
-  "UPC": ["upc", "barcode", "upc_code"],
-  "Price": ["price", "retail_price", "msrp"],
-  "Quantity": ["quantity", "qty", "stock_qty"],
-  "Image URL": ["image", "image_url", "primary_image"],
-  "Bullet Point 1": ["bullet_1", "feature_1", "highlight_1"],
-  "Bullet Point 2": ["bullet_2", "feature_2", "highlight_2"],
-  "Bullet Point 3": ["bullet_3", "feature_3", "highlight_3"],
-  "Keywords": ["keywords", "search_terms", "seo_keywords"]
-}
-    ''', language='json')
-
-# Footer
-st.markdown("---")
-st.markdown(
-    "<div style='text-align: center; color: #64748b; font-size: 0.875rem;'>"
-    "🎯 Target Masterfile Automation Tool | Built with Streamlit | "
-    "<a href='https://github.com' style='color: #cc0000; text-decoration: none;'>GitHub</a>"
-    "</div>", 
-    unsafe_allow_html=True
-)
-
 
