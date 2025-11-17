@@ -83,8 +83,8 @@ def safe_filename(name: str, fallback: str = "final_masterfile"):
     name = re.sub(r"[^A-Za-z0-9._ -]+", "", name.strip())
     return name or fallback
 
-# ── Gender inference helpers (added) ─────────────────────────────────
-_APOS = r"[’']"  # straight/curly apostrophes
+# ── Gender inference (already added) ─────────────────────────────────
+_APOS = r"[’']"
 _GENDER_W = re.compile(rf"\b(women(?:{_APOS}s)?|woman|female|lad(?:y|ies))\b", re.I)
 _GENDER_M = re.compile(rf"\b(men(?:{_APOS}s)?|man|male|gent(?:lemen)?)\b", re.I)
 _UNISEX   = re.compile(r"\b(unisex|all genders|everyone|for all|men\s*&\s*women|women\s*&\s*men)\b", re.I)
@@ -93,7 +93,7 @@ def _has_w(text: str) -> bool: return bool(_GENDER_W.search((text or "")))
 def _has_m(text: str) -> bool: return bool(_GENDER_M.search((text or "")))
 def _is_unisex(text: str) -> bool: return bool(_UNISEX.search((text or "").lower()))
 
-# Your SEO field mapping for analysis priority
+# ── SEO field aliases (provided) ─────────────────────────────────────
 SEO_ALIASES = {
     "Product Name": ["Product Name", "item_name", "Item Name", "Walmart Title - en-US", "Title"],
     "Description": ["Product Description", "Description", "long_description", "Walmart Description - en-US"],
@@ -122,7 +122,7 @@ def select_seo_columns(df: pd.DataFrame) -> list[str]:
 
 def _column_priority_score(col_name: str) -> int:
     n = norm(col_name)
-    if "title" in n or "product name" in n: return 3  # highest
+    if "title" in n or "product name" in n: return 3
     if "bullet" in n or "feature" in n:     return 2
     if "description" in n:                   return 1
     return 0
@@ -131,7 +131,6 @@ def order_seo_columns(cols: list[str]) -> list[str]:
     return sorted(cols, key=_column_priority_score, reverse=True)
 
 def infer_gender_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
-    # unisex first
     for c in ordered_cols:
         t = str(row.get(c, ""))
         if _is_unisex(t):
@@ -150,6 +149,34 @@ def infer_gender_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
     if any_w: return "Women"
     if any_m: return "Men"
     return "Gender Neutral"
+
+# ── NEW: Health & Beauty Subtype inference ───────────────────────────
+# Valid values: Collagen, Protein Powder
+_COLLAGEN_RX = re.compile(r"\bcollagen\b", re.I)
+# treat classic powder terms; avoid false positives like "protein bar"/"protein shake" unless clear powder cues exist
+_PROTEIN_POWDER_RX = re.compile(
+    r"(\bprotein\s+powder\b|\bwhey\b|\bcasein\b|\b(isolate|concentrate)\b|\bpea\s+protein\b|\bsoy\s+protein\b|\brice\s+protein\b|\bprotein\s+blend\b)",
+    re.I
+)
+_EXCLUDE_NON_POWDER = re.compile(r"\b(protein\s+bar|protein\s+shake|ready[-\s]?to[-\s]?drink)\b", re.I)
+
+def infer_hb_subtype_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
+    # Priority pass: title/bullets first by ordered_cols
+    for c in ordered_cols:
+        txt = str(row.get(c, "")) or ""
+        if not txt: 
+            continue
+        if _COLLAGEN_RX.search(txt):
+            return "Collagen"
+        if _PROTEIN_POWDER_RX.search(txt) and not _EXCLUDE_NON_POWDER.search(txt):
+            return "Protein Powder"
+    # If still inconclusive, broader scan across all SEO text
+    blob = " ".join(str(row.get(c, "")) for c in ordered_cols)
+    if _COLLAGEN_RX.search(blob):
+        return "Collagen"
+    if _PROTEIN_POWDER_RX.search(blob) and not _EXCLUDE_NON_POWDER.search(blob):
+        return "Protein Powder"
+    return ""  # leave blank when not confidently detected
 
 # ── ZIP / XML helpers ────────────────────────────────────────────────
 def _find_sheet_part_path(z: zipfile.ZipFile, sheet_name: str) -> str:
@@ -363,7 +390,6 @@ if onboarding_file is not None:
                 fname = (masterfile_file.name or "").lower()
                 defaults = [v for v in vals if v.lower() in fname]
             chosen = st.multiselect("Include only these values from column A", options=vals, default=defaults)
-            # persist for processing step
             st.session_state.cat_col = first_col
             st.session_state.cat_values = chosen
         else:
@@ -477,14 +503,18 @@ if go:
         else:
             st.warning("No category column detected — no filtering applied.")
 
-        # Step 3.7: infer Gender from SEO columns (added)
+        # Step 3.7: infer Gender and Health & Beauty Subtype from SEO columns
         try:
             seo_cols = select_seo_columns(on_df)
             ordered = order_seo_columns(seo_cols)
             on_df["Gender"] = on_df.apply(lambda r: infer_gender_from_columns(r, ordered), axis=1)
+            # NEW column exactly as requested (will map if template header matches; norm() handles case)
+            on_df["health and beauty subtype*"] = on_df.apply(lambda r: infer_hb_subtype_from_columns(r, ordered), axis=1)
         except Exception:
             on_df["Gender"] = "Gender Neutral"
-        # refresh headers so mapping sees "Gender"
+            on_df["health and beauty subtype*"] = ""
+
+        # refresh headers so mapping sees the new columns
         on_headers = list(on_df.columns)
 
         # Step 4: mapping
@@ -533,7 +563,7 @@ if go:
         st.download_button("⬇️ Download Final Masterfile", data=out_bytes, file_name=final_filename,
                            mime=mime_map.get(ext, mime_map[".xlsx"]), key="dl_final_fast", use_container_width=True)
 
-        # ✅ Summary metrics
+        # Summary metrics
         st.markdown("---")
         c1, c2, c3, c4 = st.columns(4)
         with c1: st.metric("Total Rows", f"{n_rows:,}")
