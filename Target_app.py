@@ -83,12 +83,11 @@ def safe_filename(name: str, fallback: str = "final_masterfile"):
     name = re.sub(r"[^A-Za-z0-9._ -]+", "", name.strip())
     return name or fallback
 
-# ── Gender inference (already added) ─────────────────────────────────
+# ── Gender inference ─────────────────────────────────────────────────
 _APOS = r"[’']"
 _GENDER_W = re.compile(rf"\b(women(?:{_APOS}s)?|woman|female|lad(?:y|ies))\b", re.I)
 _GENDER_M = re.compile(rf"\b(men(?:{_APOS}s)?|man|male|gent(?:lemen)?)\b", re.I)
 _UNISEX   = re.compile(r"\b(unisex|all genders|everyone|for all|men\s*&\s*women|women\s*&\s*men)\b", re.I)
-
 def _has_w(text: str) -> bool: return bool(_GENDER_W.search((text or "")))
 def _has_m(text: str) -> bool: return bool(_GENDER_M.search((text or "")))
 def _is_unisex(text: str) -> bool: return bool(_UNISEX.search((text or "").lower()))
@@ -103,7 +102,6 @@ SEO_ALIASES = {
     "bullet_point4": ["Bullet point 4","bullet_point4", "Bullet Feature 4", "bullet point 4", "bullet_point4 - en-US", "Key Features #4 - en-US"],
     "bullet_point5": ["Bullet point 5","bullet_point5", "Bullet Feature 5", "bullet point 5", "bullet_point5 - en-US", "Key Features #5 - en-US"],
 }
-
 def select_seo_columns(df: pd.DataFrame) -> list[str]:
     header_lookup = {norm(c): c for c in df.columns}
     picks = []
@@ -119,14 +117,12 @@ def select_seo_columns(df: pd.DataFrame) -> list[str]:
         return picks
     heur = [c for c in df.columns if any(k in norm(c) for k in ["title","product name","description","bullet","feature","name"])]
     return heur if heur else list(df.columns)
-
 def _column_priority_score(col_name: str) -> int:
     n = norm(col_name)
     if "title" in n or "product name" in n: return 3
     if "bullet" in n or "feature" in n:     return 2
     if "description" in n:                   return 1
     return 0
-
 def order_seo_columns(cols: list[str]) -> list[str]:
     return sorted(cols, key=_column_priority_score, reverse=True)
 
@@ -150,33 +146,468 @@ def infer_gender_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
     if any_m: return "Men"
     return "Gender Neutral"
 
-# ── NEW: Health & Beauty Subtype inference ───────────────────────────
-# Valid values: Collagen, Protein Powder
-_COLLAGEN_RX = re.compile(r"\bcollagen\b", re.I)
-# treat classic powder terms; avoid false positives like "protein bar"/"protein shake" unless clear powder cues exist
-_PROTEIN_POWDER_RX = re.compile(
-    r"(\bprotein\s+powder\b|\bwhey\b|\bcasein\b|\b(isolate|concentrate)\b|\bpea\s+protein\b|\bsoy\s+protein\b|\brice\s+protein\b|\bprotein\s+blend\b)",
-    re.I
-)
-_EXCLUDE_NON_POWDER = re.compile(r"\b(protein\s+bar|protein\s+shake|ready[-\s]?to[-\s]?drink)\b", re.I)
-
+# ── Health & Beauty Subtype (≤3) ─────────────────────────────────────
+_EXCLUDE_NON_POWDER = re.compile(r"\b(protein\s+bar|protein\s+cookie|protein\s+shake|ready[-\s]?to[-\s]?drink|rtd)\b", re.I)
+_HB_SUBTYPE_PATTERNS = {
+    "Collagen": [r"\bcollagen\b", r"\bcollagen\s+peptid(e|es)\b", r"\bhydrol(y|i)zed\s+collagen\b", r"\bmarine\s+collagen\b", r"\btype\s*(i|ii|iii)\b"],
+    "Protein Powder": [r"\bprotein\s+powder\b", r"\bwhey\b", r"\bcasein\b", r"\bmicellar\s+casein\b", r"\b(isolate|concentrate)\b", r"\bpea\s+protein\b", r"\bsoy\s+protein\b", r"\brice\s+protein\b", r"\bprotein\s+blend\b"],
+    "Multivitamins": [r"\bmult(i|i-)?vitamin(s)?\b", r"\bdaily\s+multivitamin(s)?\b", r"\bmulti[-\s]?vit\b"],
+    "Vitamin A": [r"\bvit(amin)?\s*a\b", r"\bretinol\b", r"\bretinyl\b"],
+    "Vitamin B": [r"\bvit(amin)?\s*b(\d{1,2})?\b", r"\bb[-\s]?complex\b", r"\bthiamin(e)?\b", r"\briboflavin\b", r"\bniacin(amide)?\b", r"\bpantothenic\b", r"\bpyridoxin(e)?\b", r"\bbiotin\b", r"\bfolate\b", r"\bfolic\s+acid\b", r"\bcobalamin\b", r"\bB-?12\b", r"\bB-?6\b", r"\bB-?3\b"],
+    "Vitamin C": [r"\bvit(amin)?\s*c\b", r"\bascorb(ic|ate)\b", r"\bester[-\s]?c\b"],
+    "Vitamin D": [r"\bvit(amin)?\s*d\b", r"\bd-?3\b", r"\bd-?2\b", r"\bcholecalciferol\b", r"\bergocalciferol\b"],
+    "Vitamin E": [r"\bvit(amin)?\s*e\b", r"\btocopherol\b", r"\btocotrienol\b"],
+    "Vitamin K": [r"\bvit(amin)?\s*k\b", r"\bk-?2\b", r"\bmk-?\s?7\b", r"\bmenaquinone\b", r"\bphylloquinone\b"],
+}
+def _hb_score_patterns(text: str, patterns: list[str]) -> int:
+    if not text: return 0
+    return sum(1 for p in patterns if re.search(p, text, re.I))
 def infer_hb_subtype_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
-    # Priority pass: title/bullets first by ordered_cols
+    scores = {k: 0 for k in _HB_SUBTYPE_PATTERNS.keys()}
+    for c in ordered_cols:
+        txt = str(row.get(c, "")) or ""
+        if not txt:
+            continue
+        weight = _column_priority_score(c)
+        protein_powder_ok = True
+        if _EXCLUDE_NON_POWDER.search(txt) and not re.search(r"\bprotein\s+powder\b", txt, re.I):
+            protein_powder_ok = False
+        for label, pats in _HB_SUBTYPE_PATTERNS.items():
+            if label == "Protein Powder" and not protein_powder_ok:
+                continue
+            hits = _hb_score_patterns(txt, pats)
+            if hits:
+                scores[label] += weight * hits
+    picks = [(k, v) for k, v in scores.items() if v > 0]
+    if not picks:
+        return ""
+    picks.sort(key=lambda kv: (-kv[1], kv[0]))
+    return "|".join([k for k, _ in picks[:3]])
+
+# ── Health Application* (≤5) ─────────────────────────────────────────
+_HEALTH_APP_LABELS = [
+    "Adrenal Health","Aging","Allergies","Anxiety","Bladder Infection","Bladder Support","Bloating","Blood Clots",
+    "Blood Sugar Imbalance","Bone Health","Children's Health","Cholesterol Level Maintenance","Circulatory System Health",
+    "Constipation","Dental Health","Diabetes","Diarrhea","Digestive Health","Endurance","Energy","eye health","Fertility",
+    "Fever","Gout","Hair, Skin and Nail Health","Heart Health","High Cholesterol","Homocysteine Levels","Hydration",
+    "Immune System Health","Infection","Inflammation","Insomnia","Intestinal Health","Iron Deficiency",
+    "Irritable Bowel Syndrome (IBS)","Joint Health","Joint Pain","Joint Support","Kidney Health","Lactation",
+    "Liver Health","Lymphatic Health","Memory and Brain Health","Men's Health","Menopause","Metabolism","Mood",
+    "Morning Sickness","Muscle Growth","Muscle Pain","Muscle Tension","Nail Health","Nausea","Nerve Pain",
+    "Nervous System Health","overall health","Pain Relief","PMS","Postnatal Health","Postpartum Care","Pregnancy",
+    "Premenstrual Breast Discomfort","Prenatal Health","Pressure Ulcers","Prostate Health","Respiratory Health",
+    "Seasonal Allergies","Sexual Health","Sinusitis","Skin Health","Sleep Disturbance","Sleep Support",
+    "Sports Performance","Strength","Stress","Testosterone Level","Thyroid Health","Tinnitus","Uric Acid Levels",
+    "Urinary Health","Urinary Tract Infection","Vaginal Health","Vertigo","Water Retention","Weight Loss",
+    "Weight Management","Women's Health","Yeast Infection"
+]
+def _make_base_pat(label: str) -> str:
+    s = label.lower()
+    s = s.replace("children's", r"children(?:'s)?").replace("men's", r"men(?:'s)?").replace("women's", r"women(?:'s)?")
+    s = re.sub(r"\s*\(.*?\)\s*", "", s)
+    tokens = re.split(r"[^a-z0-9]+", s.strip())
+    tokens = [re.escape(t) for t in tokens if t]
+    if not tokens:
+        return r"$^"
+    return r"\b" + r"\W+".join(tokens) + r"\b"
+_HEALTH_APP_SYNONYMS = {
+    "Digestive Health": [r"\bdigesti(ve|on)\b", r"\bgut\s+health\b"],
+    "Immune System Health": [r"\bimmune(\s+system)?\s+health\b", r"\bimmune\s+support\b", r"\bimmunity\s+support\b", r"\bboost\s+immun"],
+    "Joint Health": [r"\bjoint\s+health\b", r"\bhealthy\s+joints\b"],
+    "Joint Support": [r"\bjoint\s+support\b"],
+    "Joint Pain": [r"\bjoint\s+pain\b", r"\barthriti[cs]\b", r"\barthritic\s+pain\b"],
+    "Sleep Support": [r"\bsleep\s+support\b", r"\bbetter\s+sleep\b", r"\bpromotes\s+sleep\b", r"\bsleep\s+quality\b"],
+    "Sleep Disturbance": [r"\bsleep\s+disturbance\b", r"\btrouble\s+sleep(ing)?\b"],
+    "Insomnia": [r"\binsomnia\b"],
+    "Energy": [r"\benergy\b", r"\benergiz", r"\bpre[-\s]?workout\b"],
+    "Endurance": [r"\bendurance\b", r"\bstamina\b"],
+    "Stress": [r"\bstress\b", r"\bstress\s+relief\b", r"\bstress\s+support\b"],
+    "Anxiety": [r"\banxiety\b"],
+    "Weight Loss": [r"\bweight\s+loss\b", r"\bfat\s+loss\b", r"\bslim(ming)?\b"],
+    "Weight Management": [r"\bweight\s+management\b", r"\bmanage\s+weight\b", r"\bmaintain\s+weight\b"],
+    "Bone Health": [r"\bbone\s+health\b", r"\bbone\s+density\b", r"\bosteoporosis\b"],
+    "Heart Health": [r"\bheart\s+health\b", r"\bcardio(vascular)?\b"],
+    "Skin Health": [r"\bskin\s+health\b", r"\bhealthy\s+skin\b"],
+    "Hair, Skin and Nail Health": [r"\bhair[, ]+\s*skin\s*(and|&)?\s*nail", r"\bhair\s*skin\s*and\s*nails\b"],
+    "Memory and Brain Health": [r"\bmemory\b", r"\bbrain\s+health\b", r"\bcognit(ive|ion)\b", r"\bfocus\b", r"\bconcentration\b", r"\bnootropic\b"],
+    "Hydration": [r"\bhydrat(e|ion)\b", r"\belectrolyte(s)?\b"],
+    "Cholesterol Level Maintenance": [r"\bcholesterol\b", r"\bmaintain\s+cholesterol\b", r"\bhealthy\s+cholesterol\b"],
+    "High Cholesterol": [r"\bhigh\s+cholesterol\b"],
+    "Blood Sugar Imbalance": [r"\bblood\s+sugar\b", r"\bglucose\b", r"\bglycem(i|y)c\b"],
+    "Children's Health": [r"\b(children|kids|child)\b.*\bhealth\b", r"\bfor\s+(kids|children)\b"],
+    "Men's Health": [r"\b(men|male)\b.*\bhealth\b", r"\bfor\s+men\b"],
+    "Women's Health": [r"\b(women|female)\b.*\bhealth\b", r"\bfor\s+women\b"],
+    "Irritable Bowel Syndrome (IBS)": [r"\birritable\s+bowel\s+syndrome\b", r"\bIBS\b"],
+    "eye health": [r"\beye\s+health\b", r"\bvision\b", r"\bocular\b"],
+    "Nervous System Health": [r"\bnervous\s+system\b", r"\bneurolog(y|ical)\b"],
+    "Respiratory Health": [r"\brespiratory\b", r"\blung\b", r"\bbreath(ing)?\b"],
+    "Sports Performance": [r"\bsports?\s+performance\b", r"\bathletic\b", r"\bperformance\b"],
+    "Strength": [r"\bstrength\b", r"\bstronger\b"],
+    "Pain Relief": [r"\bpain\s+relief\b", r"\banalgesic\b"],
+    "Mood": [r"\bmood\b"],
+    "Metabolism": [r"\bmetaboli[sc]m\b"],
+}
+_HEALTH_APP_REGEX = {}
+for label in _HEALTH_APP_LABELS:
+    pats = [ _make_base_pat(label) ]
+    pats.extend(_HEALTH_APP_SYNONYMS.get(label, []))
+    _HEALTH_APP_REGEX[label] = [re.compile(p, re.I) for p in pats]
+def _health_score(text: str, comp_list) -> int:
+    if not text: return 0
+    return sum(1 for rx in comp_list if rx.search(text))
+def infer_health_app_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
+    scores = {label:0 for label in _HEALTH_APP_REGEX.keys()}
     for c in ordered_cols:
         txt = str(row.get(c, "")) or ""
         if not txt: 
             continue
-        if _COLLAGEN_RX.search(txt):
-            return "Collagen"
-        if _PROTEIN_POWDER_RX.search(txt) and not _EXCLUDE_NON_POWDER.search(txt):
-            return "Protein Powder"
-    # If still inconclusive, broader scan across all SEO text
-    blob = " ".join(str(row.get(c, "")) for c in ordered_cols)
-    if _COLLAGEN_RX.search(blob):
-        return "Collagen"
-    if _PROTEIN_POWDER_RX.search(blob) and not _EXCLUDE_NON_POWDER.search(blob):
-        return "Protein Powder"
-    return ""  # leave blank when not confidently detected
+        weight = _column_priority_score(c)
+        for label, comp_list in _HEALTH_APP_REGEX.items():
+            hits = _health_score(txt, comp_list)
+            if hits:
+                scores[label] += weight * hits
+    picks = [(k, v) for k, v in scores.items() if v > 0]
+    if not picks:
+        return ""
+    picks.sort(key=lambda kv: (-kv[1], kv[0]))
+    return "|".join([k for k, _ in picks[:5]])
+
+# ── Targeted Audience* (single; default Adult) ───────────────────────
+_AUD_PAT = {
+    "Infant": [r"\bbaby|babies|infant|newborn\b", r"\b0\s*[-–]?\s*12\s*(m|mos|months)\b"],
+    "Kids":   [r"\bkid(s)?\b", r"\bchild(ren)?\b", r"\btoddler(s)?\b", r"\bpre[-\s]?school\b"],
+    "Teen":   [r"\bteen(s|age|ager|agers)?\b", r"\byouth\b"],
+    "Adult":  [r"\badult(s)?\b"]
+}
+_AGE_YEARS_RX = re.compile(r"\b(\d{1,2})\s*(?:\+|plus)?\s*(?:y(?:rs?)?|years?)\b", re.I)
+_AGE_RANGE_YEARS_RX = re.compile(r"\b(\d{1,2})\s*[-–]\s*(\d{1,2})\s*(?:y(?:rs?)?|years?)\b", re.I)
+_AGE_MONTHS_RX = re.compile(r"\b(\d{1,2})\s*(?:m|mos|months?)\b", re.I)
+def _aud_bump(scores: dict, label: str, w: int = 1):
+    scores[label] = scores.get(label, 0) + w
+def _age_to_bucket(years: int | None = None, months: int | None = None) -> str | None:
+    if months is not None:
+        if months <= 24: return "Infant"
+        elif months <= 36: return "Kids"
+        else: return "Kids"
+    if years is not None:
+        if years <= 2: return "Infant"
+        if 3 <= years <= 12: return "Kids"
+        if 13 <= years <= 17: return "Teen"
+        if years >= 18: return "Adult"
+    return None
+def infer_targeted_audience(row: pd.Series, ordered_cols: list[str], gender_val: str = "") -> str:
+    scores = {"Adult":0, "Infant":0, "Kids":0, "Teen":0}
+    if str(gender_val).strip() in ("Men","Women"):
+        _aud_bump(scores, "Adult", 2)
+    for c in ordered_cols:
+        txt = str(row.get(c, "")) or ""
+        if not txt: 
+            continue
+        w = _column_priority_score(c)
+        for label, pats in _AUD_PAT.items():
+            for p in pats:
+                if re.search(p, txt, re.I):
+                    _aud_bump(scores, label, w)
+        for m in _AGE_YEARS_RX.finditer(txt):
+            y = int(m.group(1))
+            bucket = _age_to_bucket(years=y)
+            if bucket: _aud_bump(scores, bucket, w+1)
+        for m in _AGE_RANGE_YEARS_RX.finditer(txt):
+            y1, y2 = int(m.group(1)), int(m.group(2))
+            for y in (y1, y2):
+                bucket = _age_to_bucket(years=y)
+                if bucket: _aud_bump(scores, bucket, w+1)
+        for m in _AGE_MONTHS_RX.finditer(txt):
+            mo = int(m.group(1))
+            bucket = _age_to_bucket(months=mo)
+            if bucket: _aud_bump(scores, bucket, w+1)
+    order = ["Infant","Kids","Teen","Adult"]
+    best = max(order, key=lambda lab: (scores.get(lab,0), -order.index(lab)))
+    if scores.get(best,0) == 0:
+        return "Adult"
+    return best
+
+# ── Product Form* (single; 'Multiple Forms' if >1 strong) ────────────
+_PRODUCT_FORM_PATTERNS = {
+    "Bar":               [r"\b(protein|nutrition)\s+bar\b", r"\bbar\b"],
+    "Caplet":            [r"\bcaplet(s)?\b"],
+    "Capsule":           [r"\bcapsule(s)?\b", r"\bcaps?\b", r"\bveg(?:etable)?\s*caps?(?:ule)?s?\b"],
+    "Chewable Tablet":   [r"\bchewable\s+tablet(s)?\b", r"\bODT\b", r"\borally\s+disintegrating\s+tablet(s)?\b", r"\bfast[-\s]?dissolv(e|ing)\s+tablet(s)?\b"],
+    "Chewable":          [r"\bchewable\b"],
+    "Cream":             [r"\bcream(s)?\b"],
+    "Dissolving Strip":  [r"\bdissolving\s+strip(s)?\b", r"\boral\s+strip(s)?\b", r"\bmouth\s+strip(s)?\b"],
+    "Dissolving Tablet": [r"\bdissolving\s+tablet(s)?\b", r"\beffervescent\s+tablet(s)?\b", r"\bsublingual\s+tablet(s)?\b"],
+    "Gel":               [r"\btopical\s+gel\b", r"\bgel\b"],
+    "Gelcap":            [r"\bgel[-\s]?cap(s)?\b", r"\bgelcap(s)?\b"],
+    "Gum":               [r"\bgum\b"],
+    "Gummy":             [r"\bgummy\b", r"\bgummies\b"],
+    "Liquid":            [r"\bliquid\b", r"\bsyrup\b", r"\bdrops?\b", r"\belixir\b", r"\btincture\b", r"\bsuspension\b", r"\bsolution\b"],
+    "Lollipop":          [r"\blollipop(s)?\b"],
+    "Lozenge":           [r"\blozenge(s)?\b", r"\bpastille(s)?\b", r"\btroche(s)?\b", r"\bthroat\s+drops?\b", r"\bcough\s+drops?\b"],
+    "Patch":             [r"\bpatch(es)?\b", r"\btransdermal\b"],
+    "Powder":            [r"\bpowder(ed)?\b", r"\bdrink\s+mix\b"],
+    "Softgel":           [r"\bsoft[-\s]?gel(s)?\b", r"\bsoftgel(s)?\b"],
+    "Tablet":            [r"\btablet(s)?\b", r"\btabs?\b"],
+    "Tea":               [r"\btea\b(?!\s*tree)"],
+    "Wafer":             [r"\bwafer(s)?\b"],
+}
+_PF_EXCLUDE = {
+    "Gel": [r"\bsoft[-\s]?gel(s)?\b", r"\bgel[-\s]?cap(s)?\b", r"\bgelcap(s)?\b"],
+    "Capsule": [r"\bsoft[-\s]?gel(s)?\b", r"\bgelcap(s)?\b", r"\bgel[-\s]?cap(s)?\b"],
+    "Chewable": [r"\bchewable\s+tablet(s)?\b", r"\bgummies?\b"],
+    "Liquid": [r"\bliquid\s+softgel(s)?\b"],
+    "Tablet": [r"\bchewable\s+tablet(s)?\b", r"\bdissolving\s+tablet(s)?\b", r"\beffervescent\s+tablet(s)?\b", r"\bsublingual\s+tablet(s)?\b"],
+    "Gum": [r"\bgummies?\b"],
+    "Tea": [r"\btea\s*tree\b"],
+}
+def _match_any(rx_list, text) -> int:
+    if not text: return 0
+    return sum(1 for p in rx_list if re.search(p, text, re.I))
+def _excluded(label: str, text: str) -> bool:
+    for p in _PF_EXCLUDE.get(label, []):
+        if re.search(p, text, re.I):
+            return True
+    return False
+def infer_product_form_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
+    scores = {k:0 for k in _PRODUCT_FORM_PATTERNS.keys()}
+    for c in ordered_cols:
+        txt = str(row.get(c, "")) or ""
+        if not txt:
+            continue
+        w = _column_priority_score(c)
+        for label, pats in _PRODUCT_FORM_PATTERNS.items():
+            if _excluded(label, txt):
+                continue
+            hits = _match_any(pats, txt)
+            if hits:
+                scores[label] += w * hits
+    if scores["Chewable Tablet"] > 0:
+        scores["Chewable"] = 0
+        scores["Tablet"] = max(0, scores["Tablet"] - 1)
+    if scores["Dissolving Tablet"] > 0:
+        scores["Tablet"] = 0
+    if scores["Softgel"] > 0 or scores["Gelcap"] > 0:
+        scores["Capsule"] = 0
+        scores["Gel"] = max(0, scores["Gel"] - 1)
+    if scores["Gummy"] > 0:
+        scores["Gum"] = 0
+    picks = [(k, v) for k, v in scores.items() if v > 0]
+    if not picks:
+        return ""
+    picks.sort(key=lambda kv: (-kv[1], kv[0]))
+    top_label, top_score = picks[0]
+    other_score = sum(v for _, v in picks[1:])
+    if len(picks) >= 2 and top_score < other_score * 1.5:
+        return "Multiple Forms"
+    return top_label
+
+# ── NEW: primary flavors (≤3; pipe-delimited) ────────────────────────
+_FLAVOR_LABELS = [
+    "Acai","Almond","Apple","Banana","Berry","Black Cherry","Black Currant","Black Tea","Blackberry","Blue Raspberry",
+    "Blueberry","Brown Sugar","Brownie","Bubble Gum","Butter","Cake","Caramel","Celery","Chai","Chai Latte","Chamomile",
+    "Cherry","Chocolate","Chocolate Chip","Cinnamon","Citrus","Cocoa","Coconut","Coffee","Cookie","Cookies and Cream",
+    "Cranberry","Dark Chocolate","Donut","Dragon Fruit","Elderberry","Flavored","Flaxseed","French Vanilla","Fresh",
+    "Fruit","Fruit Punch","Garlic","Goji Berry","Grape","Grapefruit","Green Apple","Green Tea","Guava","Hibiscus","Honey",
+    "Kiwi","Lemon","Lemonade","Lime","Macadamia Nut","Mango","Maple","Marshmallow","Matcha","Melon","Milk","Milk Chocolate",
+    "Mint","Mixed Berry","Mixed Fruit","Mocha","Mushroom","Natural","No Flavor","Nut","Oatmeal","Oats","Orange","Passion Fruit",
+    "Peach","Peanut Butter","Pear","Peppermint","Pineapple","Pistachio","Pomegranate","Raspberry","Salted Caramel","Seaberry",
+    "Sour","Spicy","Spirulina","Strawberry","Sugar","Tangerine","Tea","Toffee","Tropical Fruit","Turmeric","Ube","Unflavored",
+    "Vanilla","Vegetable Blend","Watermelon","White Chocolate","Whole Wheat","Wild Berry","Yuzu"
+]
+_FLAVOR_PAT = {
+    "Blue Raspberry": [r"\bblue\s+rasp(berry)?\b", r"\bblue\s*razz\b", r"\bbluerazz\b"],
+    "Cookies and Cream": [r"cookies?\s*(and|&|n)\s*cream", r"cookie\s*n\s*cream"],
+    "French Vanilla": [r"\bfrench\s+vanilla\b"],
+    "Milk Chocolate": [r"\bmilk\s+choc(olate)?\b"],
+    "Dark Chocolate": [r"\bdark\s+choc(olate)?\b"],
+    "White Chocolate": [r"\bwhite\s+choc(olate)?\b"],
+    "Salted Caramel": [r"\bsalted\s+caramel\b"],
+    "Fruit Punch": [r"\bfruit\s+punch\b"],
+    "Mixed Berry": [r"\bmixed\s+berr(y|ies)\b", r"\bberry\s+blend\b"],
+    "Wild Berry": [r"\bwild\s+berry\b", r"\bwildberry\b"],
+    "Green Tea": [r"\bgreen\s+tea\b"],
+    "Black Tea": [r"\bblack\s+tea\b"],
+    "Chai Latte": [r"\bchai\s+latte\b"],
+    "Matcha": [r"\bmatcha\b"],
+    "Unflavored": [r"\bunflavor(ed)?\b", r"\bno\s*flavor\b", r"\bplain\b", r"\boriginal\b"],
+}
+for lab in _FLAVOR_LABELS:
+    if lab not in _FLAVOR_PAT:
+        _FLAVOR_PAT[lab] = [rf"\b{re.escape(lab.lower())}\b"]
+_FLAVOR_DEMOTE_IF_CHILD = {
+    "Chocolate": ["Milk Chocolate","Dark Chocolate","White Chocolate","Chocolate Chip"],
+    "Vanilla": ["French Vanilla"],
+    "Tea": ["Green Tea","Black Tea","Chai","Chai Latte","Chamomile","Hibiscus","Matcha"],
+    "Berry": ["Blueberry","Raspberry","Strawberry","Blackberry","Elderberry","Goji Berry","Seaberry","Mixed Berry","Wild Berry"],
+    "Fruit": ["Mixed Fruit","Tropical Fruit","Fruit Punch","Orange","Apple","Mango","Peach","Grape","Guava","Pineapple","Watermelon","Pomegranate","Dragon Fruit","Passion Fruit","Tangerine","Grapefruit","Kiwi","Pear","Lemon","Lime","Green Apple"],
+    "Caramel": ["Salted Caramel"],
+    "Natural": ["Unflavored"],
+    "No Flavor": ["Unflavored"]
+}
+_FLAVOR_LOW_PRIORITY = {"Flavored","Fresh","Natural","Fruit","Tea","Berry","Milk","Nut","Sugar"}
+def _flavor_hits(label: str, text: str) -> int:
+    pats = _FLAVOR_PAT.get(label, [])
+    return sum(1 for p in pats if re.search(p, text or "", re.I))
+def infer_primary_flavors_from_columns(row: pd.Series, ordered_cols: list[str], max_picks: int = 3) -> str:
+    scores = {lab: 0.0 for lab in _FLAVOR_LABELS}
+    for c in ordered_cols:
+        txt = str(row.get(c, "")) or ""
+        if not txt:
+            continue
+        w = float(_column_priority_score(c) or 1)
+        for lab in _FLAVOR_LABELS:
+            hits = _flavor_hits(lab, txt)
+            if hits:
+                base = hits
+                if " " in lab:
+                    base += 0.5
+                if lab in _FLAVOR_LOW_PRIORITY:
+                    base -= 0.25
+                scores[lab] += w * base
+    present = {lab for lab, sc in scores.items() if sc > 0}
+    for parent, children in _FLAVOR_DEMOTE_IF_CHILD.items():
+        if parent in present and any(ch in present for ch in children):
+            scores[parent] *= 0.25
+    picks = [(k, v) for k, v in scores.items() if v >= 1.5]
+    if not picks:
+        if scores.get("Unflavored", 0) > 0:
+            return "Unflavored"
+        return ""
+    picks.sort(key=lambda kv: (-kv[1], kv[0]))
+    selected = [k for k, _ in picks[:max_picks]]
+    if "Unflavored" in selected:
+        selected = [s for s in selected if s not in ("No Flavor","Natural")]
+    return "|".join(selected)
+
+# ── NEW: Food & Drink Form 1 inference (single) ──────────────────────
+# Valid outputs: Granulated, Liquid, Liquid Concentrate, Powdered
+_FD_LIQUID_EXCLUDE = re.compile(
+    r"\b(soft[-\s]?gel|gelcap|capsule|tablet|pill|shampoo|conditioner|soap|detergent|cleaner|sanitizer|serum|lotion|toner)\b",
+    re.I
+)
+_FD_PATTERNS = {
+    "Granulated": [
+        r"\bgranulated\b", r"\bgranular\b", r"\bgranule(s)?\b"
+    ],
+    "Powdered": [
+        r"\bpowder(ed)?\b", r"\bpowder\s+mix\b", r"\bdrink\s+mix\b", r"\binstant\s+powder\b"
+    ],
+    "Liquid Concentrate": [
+        r"\bliquid\s+concentrate\b",
+        r"\bconcentrated\s+(?:drink|beverage|syrup|juice)\b",
+        r"\bwater\s+enhancer\b",
+        r"\b(drink|flavor|beverage)\s+concentrate\b",
+        r"\b(squash|cordial)\b"
+    ],
+    "Liquid": [
+        r"\bliquid\b",
+        r"\bsyrup\b",
+        r"\bready[-\s]?to[-\s]?drink\b",
+        r"\brtd\b"
+    ],
+}
+def _fd_hits(patterns: list[str], text: str) -> int:
+    if not text: return 0
+    return sum(1 for p in patterns if re.search(p, text, re.I))
+def infer_food_and_drink_form1_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
+    scores = {k: 0.0 for k in _FD_PATTERNS.keys()}
+    for c in ordered_cols:
+        txt = str(row.get(c, "")) or ""
+        if not txt:
+            continue
+        w = float(_column_priority_score(c) or 1)
+        is_non_food_liquid = bool(_FD_LIQUID_EXCLUDE.search(txt))
+        for label, pats in _FD_PATTERNS.items():
+            hits = _fd_hits(pats, txt)
+            if not hits:
+                continue
+            score = w * hits
+            if label == "Liquid" and is_non_food_liquid:
+                score *= 0.1  # demote when clearly non-food liquid context
+            scores[label] += score
+    if scores["Liquid Concentrate"] > 0:
+        scores["Liquid"] *= 0.2
+    best_label, best_score = max(scores.items(), key=lambda kv: kv[1])
+    return best_label if best_score > 0 else ""
+
+# ── NEW: Tax* inference (single best match) ──────────────────────────
+_TAX_LABELS = [  # ... (unchanged long list from earlier step)
+    "Baby Monitors w/screen size >=4\" and < 15\"",
+    "E-Bikes-Trikes_<1-HP_(750W)_Has-Pedals",
+    "Paint 2 PK - (> 8 Ounces < 1 Gallon)",
+    "Portable Gas Cans <5 Gallons",
+    # — SNIP — keep the full list exactly as in your previous version —
+    "Window and Door Weatherization","Work Gloves","Yarn, Elastic, Thread, Buttons"
+]
+_TAX_EXCLUDE = {"General"}
+_STOP_TOKENS = {"and","or","with","without","for","the","a","an","of","to","in","on","by","pk","pack","pcs","pc",
+                "oz","ounce","ounces","lb","lbs","g","gram","grams","ml","l","liter","liters","size","screen",
+                "single","dual","us","less","more","than","equal","inch","inches","gal","gallon"}
+def _normalize_token(tok: str) -> str:
+    t = tok.lower()
+    if t.endswith("ies"): t = t[:-3] + "y"
+    elif t.endswith("es"): t = t[:-2]
+    elif t.endswith("s") and len(t) > 3: t = t[:-1]
+    repl = {"children":"child","babies":"baby","women":"woman","men":"man","webcam":"web camera"}
+    return repl.get(t, t)
+def _tokens(s: str) -> set[str]:
+    raw = re.findall(r"[a-z0-9]+", (s or "").lower())
+    toks = set()
+    for t in raw:
+        n = _normalize_token(t)
+        if n and n not in _STOP_TOKENS:
+            toks.add(n)
+    return toks
+_TAX_LABEL_TOKENS = {lab: _tokens(lab) for lab in _TAX_LABELS}
+_TAX_SYNONYMS = {
+    "Deodorant": [r"\bdeodorant(s)?\b"],
+    "Antiperspirant": [r"\banti[-\s]?perspirant(s)?\b"],
+    "Sunscreen": [r"\bsun\s*screen\b", r"\bspf\b"],
+    "Baby Wipes": [r"\b(baby|infant)\s+wipes?\b"],
+    "Diaper Bags": [r"\bdiaper\s+bag(s)?\b"],
+    "Strollers": [r"\bstroller(s)?\b", r"\btravel\s+system(s)?\b"],
+    "Earbuds, Headphones and Web Cameras": [r"\bearbud(s)?\b", r"\bheadphone(s)?\b", r"\bheadset(s)?\b", r"\bweb\s*cam(s)?\b"],
+    "LED-Light Bulb": [r"\bled\b.*\blight\b|\bled\b.*\bbulb\b"],
+    "CFL Light Bulb 2 PK": [r"\bcfl\b.*\b(light|bulb)\b"],
+    "Incandescent-Light Bulb": [r"\bincandescent\b.*\b(light|bulb)\b"],
+    "Soft Drinks": [r"\bsoft\s+drink(s)?\b", r"\bsoda(s)?\b", r"\bpop\b"],
+    "Coffee Drinks  - With Milk": [r"\bcoffee\b.*\b(milk|latte|cappuccino)\b"],
+    "Coffee Drinks - Unsweetened": [r"\bblack\s+coffee\b"],
+    "Candy": [r"\bcandy\b|chocolate|toffee|taffy|caramel"],
+    "Gum": [r"\bgum\b|chewing\s+gum"],
+    "Water Bottles": [r"\bwater\s+bottle(s)?\b"],
+    "Backpacks & Book Bags": [r"\bback\s*pack(s)?\b|\bbook\s*bag(s)?\b"],
+    "Batteries": [r"\b(aa|aaa|c|d|9v)\b.*\bbatter(y|ies)\b|\bbatter(y|ies)\b"],
+}
+def _syn_hits(label: str, text: str) -> int:
+    pats = _TAX_SYNONYMS.get(label, [])
+    return sum(1 for p in pats if re.search(p, text or "", re.I))
+def infer_tax_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
+    scores = {lab: 0.0 for lab in _TAX_LABELS}
+    for c in ordered_cols:
+        txt = str(row.get(c, "")) or ""
+        if not txt:
+            continue
+        w = float(_column_priority_score(c) or 1)
+        text_tokens = _tokens(txt)
+        text_norm = " " + norm(txt) + " "
+        for lab, lab_tokens in _TAX_LABEL_TOKENS.items():
+            if lab in _TAX_EXCLUDE:
+                continue
+            inter = lab_tokens.intersection(text_tokens)
+            token_score = len(inter)
+            phrase_boost = 0.0
+            if token_score >= 2 and all(t in text_norm for t in lab_tokens):
+                phrase_boost = 1.5
+            syn_boost = 0.75 * _syn_hits(lab, txt)
+            scores[lab] += w * (token_score + phrase_boost + syn_boost)
+    best_label, best_score = "", 0.0
+    for lab, sc in scores.items():
+        if sc > best_score:
+            best_label, best_score = lab, sc
+    if best_score <= 2.0:
+        return ""
+    return best_label
 
 # ── ZIP / XML helpers ────────────────────────────────────────────────
 def _find_sheet_part_path(z: zipfile.ZipFile, sheet_name: str) -> str:
@@ -244,21 +675,18 @@ def _intersects_range(a1: str, r1: int, r2: int) -> bool:
     if lo>hi: lo,hi=hi,lo
     return not (hi<r1 or lo>r2)
 
-# ── Writer (non-empty inlineStr cells only) ──────────────────────────
+# ── Writer (inlineStr only) ──────────────────────────────────────────
 def _patch_sheet_xml(sheet_xml_bytes: bytes, header_row: int, start_row: int, used_cols_final: int, block_2d: list) -> bytes:
     root = ET.fromstring(sheet_xml_bytes)
     _ensure_ws_x14ac(root)
-
     sheetData = root.find(f"{{{XL_NS_MAIN}}}sheetData")
     if sheetData is None:
         sheetData = ET.SubElement(root, f"{{{XL_NS_MAIN}}}sheetData")
-
     for row in list(sheetData):
         try: r = int(row.attrib.get("r") or "0")
         except Exception: r = 0
         if r >= start_row:
             sheetData.remove(row)
-
     mergeCells = root.find(f"{{{XL_NS_MAIN}}}mergeCells")
     if mergeCells is not None:
         for mc in list(mergeCells):
@@ -266,17 +694,14 @@ def _patch_sheet_xml(sheet_xml_bytes: bytes, header_row: int, start_row: int, us
                 mergeCells.remove(mc)
         if len(list(mergeCells)) == 0:
             root.remove(mergeCells)
-
     row_span = f"1:{used_cols_final}" if used_cols_final > 0 else "1:1"
     n_rows = len(block_2d)
-
     for i in range(n_rows):
         r = start_row + i
         src_row = block_2d[i]
         row_el = ET.Element(f"{{{XL_NS_MAIN}}}row", r=str(r))
         row_el.set("spans", row_span)
         row_el.set("{http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac}dyDescent", "0.25")
-
         for j in range(used_cols_final):
             val = src_row[j] if j < len(src_row) else ""
             txt = sanitize_xml_text(val).strip() if val else ""
@@ -289,23 +714,18 @@ def _patch_sheet_xml(sheet_xml_bytes: bytes, header_row: int, start_row: int, us
             t_el.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
             t_el.text = txt
             row_el.append(c)
-
         sheetData.append(row_el)
-
     dim = root.find(f"{{{XL_NS_MAIN}}}dimension")
     if dim is None:
         dim = ET.SubElement(root, f"{{{XL_NS_MAIN}}}dimension", ref="A1:A1")
     last_row = max(header_row, start_row + max(0, n_rows) - 1)
     dim.set("ref", _union_dimension(dim.attrib.get("ref", "A1:A1"), used_cols_final, last_row))
-
     af = root.find(f"{{{XL_NS_MAIN}}}autoFilter")
     if af is not None:
         af.set("ref", f"A{header_row}:{_col_letter(used_cols_final)}{last_row}")
-
     sheetPr = root.find(f"{{{XL_NS_MAIN}}}sheetPr")
     if sheetPr is not None and sheetPr.attrib.get("filterMode"):
         sheetPr.attrib.pop("filterMode", None)
-
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 def _patch_table_xml(table_xml_bytes: bytes, header_row: int, last_row: int, last_col_n: int) -> bytes:
@@ -503,16 +923,36 @@ if go:
         else:
             st.warning("No category column detected — no filtering applied.")
 
-        # Step 3.7: infer Gender and Health & Beauty Subtype from SEO columns
+        # Step 3.7: infer from SEO columns (adds new derived columns)
         try:
             seo_cols = select_seo_columns(on_df)
             ordered = order_seo_columns(seo_cols)
+
             on_df["Gender"] = on_df.apply(lambda r: infer_gender_from_columns(r, ordered), axis=1)
-            # NEW column exactly as requested (will map if template header matches; norm() handles case)
             on_df["health and beauty subtype*"] = on_df.apply(lambda r: infer_hb_subtype_from_columns(r, ordered), axis=1)
+            on_df["Health Application*"] = on_df.apply(lambda r: infer_health_app_from_columns(r, ordered), axis=1)
+            on_df["Targeted Audience*"] = on_df.apply(lambda r: infer_targeted_audience(r, ordered, r.get("Gender","")), axis=1)
+            on_df["Legally Required Information*"] = "Healthcare Disclaimer"
+            on_df["Product Form*"] = on_df.apply(lambda r: infer_product_form_from_columns(r, ordered), axis=1)
+            on_df["primary flavors"] = on_df.apply(lambda r: infer_primary_flavors_from_columns(r, ordered, 3), axis=1)
+
+            # NEW: Food & Drink Form 1 (Granulated / Liquid / Liquid Concentrate / Powdered)
+            on_df["food and drink form 1"] = on_df.apply(lambda r: infer_food_and_drink_form1_from_columns(r, ordered), axis=1)
+
+            on_df["Prop 65"] = "No"
+            on_df["Tax*"] = on_df.apply(lambda r: infer_tax_from_columns(r, ordered), axis=1)
+
         except Exception:
             on_df["Gender"] = "Gender Neutral"
             on_df["health and beauty subtype*"] = ""
+            on_df["Health Application*"] = ""
+            on_df["Targeted Audience*"] = "Adult"
+            on_df["Legally Required Information*"] = "Healthcare Disclaimer"
+            on_df["Product Form*"] = ""
+            on_df["primary flavors"] = ""
+            on_df["food and drink form 1"] = ""
+            on_df["Prop 65"] = "No"
+            on_df["Tax*"] = ""
 
         # refresh headers so mapping sees the new columns
         on_headers = list(on_df.columns)
@@ -555,7 +995,7 @@ if go:
         # Step 6: write file
         slog("⏳ **Step 6/6:** Writing final masterfile via fast XML...", 0.85)
         out_bytes = fast_patch_template(master_bytes=master_bytes, sheet_name=MASTER_TEMPLATE_SHEET,
-                                        header_row=MASTER_DISPLAY_ROW, start_row=master_SECONDARY_ROW+1 if False else  MASTER_DATA_START_ROW,
+                                        header_row=MASTER_DISPLAY_ROW, start_row=MASTER_DATA_START_ROW,
                                         used_cols=used_cols, block_2d=block)
         st.success("🎉 **Complete!**")
         final_base = safe_filename(final_name_input, fallback="target_final_masterfile")
