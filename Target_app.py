@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
+from openpyxl.styles import PatternFill
 from difflib import SequenceMatcher
 
 # ── Page meta / theme ────────────────────────────────────────────────
@@ -401,7 +402,7 @@ def infer_product_form_from_columns(row: pd.Series, ordered_cols: list[str]) -> 
         return "Multiple Forms"
     return top_label
 
-# ── NEW: primary flavors (≤3; pipe-delimited) ────────────────────────
+# ── primary flavors (≤3; pipe-delimited) ────────────────────────────
 _FLAVOR_LABELS = [
     "Acai","Almond","Apple","Banana","Berry","Black Cherry","Black Currant","Black Tea","Blackberry","Blue Raspberry",
     "Blueberry","Brown Sugar","Brownie","Bubble Gum","Butter","Cake","Caramel","Celery","Chai","Chai Latte","Chamomile",
@@ -479,19 +480,14 @@ def infer_primary_flavors_from_columns(row: pd.Series, ordered_cols: list[str], 
         selected = [s for s in selected if s not in ("No Flavor","Natural")]
     return "|".join(selected)
 
-# ── NEW: Food & Drink Form 1 inference (single) ──────────────────────
-# Valid outputs: Granulated, Liquid, Liquid Concentrate, Powdered
+# ── Food & Drink Form 1 (single) ─────────────────────────────────────
 _FD_LIQUID_EXCLUDE = re.compile(
     r"\b(soft[-\s]?gel|gelcap|capsule|tablet|pill|shampoo|conditioner|soap|detergent|cleaner|sanitizer|serum|lotion|toner)\b",
     re.I
 )
 _FD_PATTERNS = {
-    "Granulated": [
-        r"\bgranulated\b", r"\bgranular\b", r"\bgranule(s)?\b"
-    ],
-    "Powdered": [
-        r"\bpowder(ed)?\b", r"\bpowder\s+mix\b", r"\bdrink\s+mix\b", r"\binstant\s+powder\b"
-    ],
+    "Granulated": [r"\bgranulated\b", r"\bgranular\b", r"\bgranule(s)?\b"],
+    "Powdered": [r"\bpowder(ed)?\b", r"\bpowder\s+mix\b", r"\bdrink\s+mix\b", r"\binstant\s+powder\b"],
     "Liquid Concentrate": [
         r"\bliquid\s+concentrate\b",
         r"\bconcentrated\s+(?:drink|beverage|syrup|juice)\b",
@@ -499,12 +495,7 @@ _FD_PATTERNS = {
         r"\b(drink|flavor|beverage)\s+concentrate\b",
         r"\b(squash|cordial)\b"
     ],
-    "Liquid": [
-        r"\bliquid\b",
-        r"\bsyrup\b",
-        r"\bready[-\s]?to[-\s]?drink\b",
-        r"\brtd\b"
-    ],
+    "Liquid": [r"\bliquid\b", r"\bsyrup\b", r"\bready[-\s]?to[-\s]?drink\b", r"\brtd\b"],
 }
 def _fd_hits(patterns: list[str], text: str) -> int:
     if not text: return 0
@@ -523,20 +514,20 @@ def infer_food_and_drink_form1_from_columns(row: pd.Series, ordered_cols: list[s
                 continue
             score = w * hits
             if label == "Liquid" and is_non_food_liquid:
-                score *= 0.1  # demote when clearly non-food liquid context
+                score *= 0.1
             scores[label] += score
     if scores["Liquid Concentrate"] > 0:
         scores["Liquid"] *= 0.2
     best_label, best_score = max(scores.items(), key=lambda kv: kv[1])
     return best_label if best_score > 0 else ""
 
-# ── NEW: Tax* inference (single best match) ──────────────────────────
-_TAX_LABELS = [  # ... (unchanged long list from earlier step)
+# ── Tax* inference (single best match) ───────────────────────────────
+_TAX_LABELS = [
     "Baby Monitors w/screen size >=4\" and < 15\"",
     "E-Bikes-Trikes_<1-HP_(750W)_Has-Pedals",
     "Paint 2 PK - (> 8 Ounces < 1 Gallon)",
     "Portable Gas Cans <5 Gallons",
-    # — SNIP — keep the full list exactly as in your previous version —
+    # — SNIP — keep your full list here —
     "Window and Door Weatherization","Work Gloves","Yarn, Elastic, Thread, Buttons"
 ]
 _TAX_EXCLUDE = {"General"}
@@ -935,10 +926,7 @@ if go:
             on_df["Legally Required Information*"] = "Healthcare Disclaimer"
             on_df["Product Form*"] = on_df.apply(lambda r: infer_product_form_from_columns(r, ordered), axis=1)
             on_df["primary flavors"] = on_df.apply(lambda r: infer_primary_flavors_from_columns(r, ordered, 3), axis=1)
-
-            # NEW: Food & Drink Form 1 (Granulated / Liquid / Liquid Concentrate / Powdered)
             on_df["food and drink form 1"] = on_df.apply(lambda r: infer_food_and_drink_form1_from_columns(r, ordered), axis=1)
-
             on_df["Prop 65"] = "No"
             on_df["Tax*"] = on_df.apply(lambda r: infer_tax_from_columns(r, ordered), axis=1)
 
@@ -957,14 +945,35 @@ if go:
         # refresh headers so mapping sees the new columns
         on_headers = list(on_df.columns)
 
+        # ── Helper attributes we will highlight if empty ──────────────
+        HELPER_HEADERS = [
+            "health and beauty subtype*",
+            "Health Application*",
+            "Targeted Audience*",
+            "Legally Required Information*",
+            "Product Form*",
+            "primary flavors",
+            "Prop 65",
+            "Tax*",
+            "food and drink form 1",
+        ]
+        HELPER_HEADERS_NORM = {norm(h) for h in HELPER_HEADERS}
+
         # Step 4: mapping
         slog("⏳ **Step 4/6:** Mapping columns...", 0.6)
         series_by_alias = {norm(h): on_df[h] for h in on_headers}
         report_lines = ["#### 🔎 Column Mapping Results"]
         master_to_source = {}; matched_count=0; unmatched_count=0
+        helper_cols_idx = set()  # 1-based indices in the template for highlighting
+
         for c, (disp, sec) in enumerate(zip(display_headers, secondary_headers), start=1):
             eff = disp; eff_norm = norm(eff)
             if not eff_norm: continue
+
+            # record helper column positions by template header
+            if eff_norm in HELPER_HEADERS_NORM:
+                helper_cols_idx.add(c)
+
             aliases = mapping_aliases.get(eff_norm, [eff])
             resolved=None; matched_alias=None
             for a in aliases:
@@ -977,6 +986,7 @@ if go:
                 sugg = top_matches(eff, on_headers, 3)
                 sug_txt = ", ".join(f"`{name}` ({round(sc*100,1)}%)" for sc,name in sugg) if sugg else "*none*"
                 report_lines.append(f"- ❌ **{eff}** ← _no match_. Suggestions: {sug_txt}"); unmatched_count+=1
+
         st.markdown("\n".join(report_lines))
         st.info(f"📊 Mapping Stats: **{matched_count} matched**, **{unmatched_count} unmatched** out of {len(display_headers)} total columns")
 
@@ -992,15 +1002,38 @@ if go:
                     block[i][col-1] = v
         slog(f"✅ Built data block: {n_rows} rows × {used_cols} columns", 0.8)
 
-        # Step 6: write file
+        # Step 6: write file (fast XML)
         slog("⏳ **Step 6/6:** Writing final masterfile via fast XML...", 0.85)
         out_bytes = fast_patch_template(master_bytes=master_bytes, sheet_name=MASTER_TEMPLATE_SHEET,
                                         header_row=MASTER_DISPLAY_ROW, start_row=MASTER_DATA_START_ROW,
                                         used_cols=used_cols, block_2d=block)
-        st.success("🎉 **Complete!**")
+
+        # Step 6b: post-highlight empty helper attrs in yellow
+        slog("🎨 Applying yellow highlight to empty helper attributes…", 0.92)
+        wb = load_workbook(io.BytesIO(out_bytes), keep_vba=(ext == ".xlsm"))
+        ws = wb[MASTER_TEMPLATE_SHEET]
+        yellow = PatternFill(fill_type="solid", fgColor="FFFF00")
+
+        # for each data row, if helper column value empty, fill yellow
+        for i in range(n_rows):
+            excel_row = MASTER_DATA_START_ROW + i
+            # safety: only highlight existing helper columns within used_cols
+            for col_idx in helper_cols_idx:
+                if col_idx < 1 or col_idx > used_cols:
+                    continue
+                val = block[i][col_idx - 1] if i < len(block) and (col_idx - 1) < len(block[i]) else ""
+                if str(val).strip() == "":
+                    ws.cell(row=excel_row, column=col_idx).fill = yellow
+
+        out_bio2 = io.BytesIO()
+        wb.save(out_bio2)
+        out_bio2.seek(0)
+        out_bytes_final = out_bio2.getvalue()
+
+        st.success("🎉 **Complete!** (with highlight on empty helper attributes)")
         final_base = safe_filename(final_name_input, fallback="target_final_masterfile")
         final_filename = f"{final_base}{ext}"
-        st.download_button("⬇️ Download Final Masterfile", data=out_bytes, file_name=final_filename,
+        st.download_button("⬇️ Download Final Masterfile", data=out_bytes_final, file_name=final_filename,
                            mime=mime_map.get(ext, mime_map[".xlsx"]), key="dl_final_fast", use_container_width=True)
 
         # Summary metrics
